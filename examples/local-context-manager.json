@@ -7,5 +7,7 @@
   "toolOutputReduction": true,
   "semanticCompaction": true,
   "handoff": true,
+  "checkpointReset": true,
+  "checkpointDirectory": null,
   "debug": false
 }

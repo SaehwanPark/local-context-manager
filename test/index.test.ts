@@ -50,8 +50,28 @@ describe("extension integration", () => {
     expect(harness.handlers.has("agent_settled")).toBe(true);
     expect(harness.handlers.has("session_before_compact")).toBe(true);
     expect(harness.handlers.has("tool_result")).toBe(true);
-    expect(harness.tools.map((tool) => tool.name)).toContain("request_context_compaction");
-    expect([...harness.commands.keys()]).toEqual(expect.arrayContaining(["context-stats", "compact-phase", "handoff"]));
+    expect(harness.tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(["request_context_compaction", "request_context_reset"]),
+    );
+    expect([...harness.commands.keys()]).toEqual(
+      expect.arrayContaining(["context-stats", "compact-phase", "checkpoint-reset", "context-checkpoints", "handoff"]),
+    );
+  });
+
+  it("queues a reset recommendation without switching sessions", async () => {
+    const harness = makeExtensionHarness();
+    const tool = harness.tools.find((candidate) => candidate.name === "request_context_reset");
+    expect(tool?.execute).toBeDefined();
+
+    const result = await (tool?.execute as (id: string, params: { reason?: string }) => Promise<Record<string, unknown>>)(
+      "reset-1",
+      { reason: "PR #123 merged" },
+    );
+
+    expect(result.details).toEqual({ queued: true, reason: "PR #123 merged" });
+    expect(result.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining("No checkpoint was written") }),
+    ]);
   });
 
   it("does not compact while a turn is still active", async () => {

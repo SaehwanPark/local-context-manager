@@ -9,6 +9,8 @@ export interface LocalContextManagerConfig {
   toolOutputReduction: boolean;
   semanticCompaction: boolean;
   handoff: boolean;
+  checkpointReset: boolean;
+  checkpointDirectory: string | null;
   debug: boolean;
 }
 
@@ -21,6 +23,8 @@ export const DEFAULT_CONFIG: Readonly<LocalContextManagerConfig> = Object.freeze
   toolOutputReduction: true,
   semanticCompaction: true,
   handoff: true,
+  checkpointReset: true,
+  checkpointDirectory: null,
   debug: false,
 });
 
@@ -36,7 +40,14 @@ export interface LoadConfigOptions {
   allowProjectConfig?: boolean;
 }
 
-const BOOLEAN_KEYS = ["enabled", "toolOutputReduction", "semanticCompaction", "handoff", "debug"] as const;
+const BOOLEAN_KEYS = [
+  "enabled",
+  "toolOutputReduction",
+  "semanticCompaction",
+  "handoff",
+  "checkpointReset",
+  "debug",
+] as const;
 const NUMBER_KEYS = [
   "softWarningTokens",
   "compactThresholdTokens",
@@ -88,6 +99,17 @@ function applyLayer(
       continue;
     }
     candidate[key] = values[key];
+  }
+
+  if ("checkpointDirectory" in values) {
+    const value = values.checkpointDirectory;
+    if (value !== null && (typeof value !== "string" || !value.trim() || value.includes("\0"))) {
+      errors.push(
+        `Ignoring checkpointDirectory${describeSource(source)}: expected a non-empty string or null`,
+      );
+    } else {
+      candidate.checkpointDirectory = value === null ? null : value.trim();
+    }
   }
 
   for (const key of NUMBER_KEYS) {

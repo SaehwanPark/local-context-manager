@@ -18,6 +18,16 @@ describe("configuration", () => {
     expect(parsed.errors.length).toBeGreaterThan(0);
   });
 
+  it("parses checkpoint reset settings and rejects an invalid directory", () => {
+    const parsed = parseConfig({ checkpointReset: false, checkpointDirectory: "~/private-checkpoints" });
+    expect(parsed.config.checkpointReset).toBe(false);
+    expect(parsed.config.checkpointDirectory).toBe("~/private-checkpoints");
+
+    const invalid = parseConfig({ checkpointDirectory: 42 });
+    expect(invalid.config.checkpointDirectory).toBe(null);
+    expect(invalid.errors.join(" ")).toContain("checkpointDirectory");
+  });
+
   it("layers global and trusted project JSON, with project values winning", async () => {
     const directory = await mkdtemp(join(tmpdir(), "local-context-manager-test-"));
     try {

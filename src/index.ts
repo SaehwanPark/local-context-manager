@@ -14,6 +14,13 @@ import type {
   SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import { runHandoff } from "./handoff.js";
+import {
+  getCheckpointStorageDirectory,
+  getLatestCheckpointResetRecord,
+  getRepositoryState,
+  listCheckpointFiles,
+  runCheckpointReset,
+} from "./checkpoint-reset.js";
 import { getRearmTokens, CompactionGate, shouldTriggerThresholdCompaction } from "./policy.js";
 import {
   DEFAULT_CONFIG,
@@ -449,6 +456,7 @@ async function buildCustomCompaction(
 
 export default function (pi: ExtensionAPI): void {
   let config: LocalContextManagerConfig = { ...DEFAULT_CONFIG };
+  let pathSettings: PiPathSettings | undefined;
   let telemetry = new ContextTelemetry();
   let gate = new CompactionGate({
     rearmTokens: getRearmTokens(config.softWarningTokens, config.compactThresholdTokens),
@@ -457,12 +465,22 @@ export default function (pi: ExtensionAPI): void {
   let turnSerial = 0;
   let semanticRequested = false;
   let semanticReason: string | undefined;
+  let checkpointResetRequested = false;
+  let checkpointResetReason: string | undefined;
   let requestedCompaction: CompactionRequestReason | undefined;
 
   const setSemanticRequest = (reason: string | undefined): void => {
     semanticRequested = true;
     semanticReason = cleanBoundaryReason(reason);
   };
+
+  const setCheckpointResetRequest = (reason: string | undefined): void => {
+    checkpointResetRequested = true;
+    checkpointResetReason = cleanBoundaryReason(reason);
+  };
+
+  const runPiCommand = (command: string, args: string[], cwd: string) =>
+    pi.exec(command, args, { cwd, timeout: 3_000 });
 
   const requestCompaction = (
     context: ExtensionContext,
@@ -522,6 +540,7 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, context) => {
     const paths = await getPiPathSettings();
+    pathSettings = paths;
     const loaded = await loadConfig({
       globalConfigPath: join(paths.agentDir, "local-context-manager.json"),
       projectConfigPath: join(context.cwd, paths.configDirName, "local-context-manager.json"),
@@ -531,7 +550,14 @@ export default function (pi: ExtensionAPI): void {
 
     const branch = context.sessionManager.getBranch();
     const existing = countCompactions(branch);
-    telemetry = new ContextTelemetry(existing.count, existing.lastAt);
+    const checkpointReset = getLatestCheckpointResetRecord(branch);
+    telemetry = new ContextTelemetry(
+      existing.count,
+      existing.lastAt,
+      checkpointReset?.count ?? 0,
+      checkpointReset?.createdAt ?? null,
+      checkpointReset?.path ?? null,
+    );
     gate = new CompactionGate({
       rearmTokens: getRearmTokens(config.softWarningTokens, config.compactThresholdTokens),
     });
@@ -539,6 +565,8 @@ export default function (pi: ExtensionAPI): void {
     turnSerial = 0;
     semanticRequested = false;
     semanticReason = undefined;
+    checkpointResetRequested = false;
+    checkpointResetReason = undefined;
     requestedCompaction = undefined;
 
     let activeEntries: SessionEntry[] = [];
@@ -595,6 +623,18 @@ export default function (pi: ExtensionAPI): void {
   pi.on("agent_settled", (_event, context) => {
     const tokens = observeContext(context, config, telemetry, gate);
     notifySoftWarning(context, config, telemetry, warned, tokens);
+
+    if (checkpointResetRequested) {
+      const reason = checkpointResetReason;
+      checkpointResetRequested = false;
+      checkpointResetReason = undefined;
+      if (context.hasUI) {
+        context.ui.notify(
+          `Checkpoint reset recommended${reason ? ` (${reason})` : ""}. No session change was made; review it with /checkpoint-reset${reason ? ` ${reason}` : ""}.`,
+          "info",
+        );
+      }
+    }
 
     if (semanticRequested && config.enabled && config.semanticCompaction) {
       requestCompaction(
@@ -741,6 +781,43 @@ export default function (pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerTool({
+    name: "request_context_reset",
+    label: "Request checkpoint reset",
+    description:
+      "Request a user-reviewed checkpoint reset after a completed semantic episode. This queues a recommendation only; it never writes a checkpoint or switches sessions.",
+    promptSnippet: "Recommend a reviewed checkpoint reset after a completed semantic episode",
+    promptGuidelines: [
+      "Use request_context_reset only after a major semantic unit is complete and detailed context is unlikely to be needed immediately, such as a merged PR, resolved issue, completed release, deployment, investigation, experiment, or accepted independent milestone.",
+      "Do not use request_context_reset during routine coding, active debugging, review, or closely related follow-up work.",
+      "request_context_reset only recommends /checkpoint-reset; it never resets the session without explicit user approval.",
+    ],
+    parameters: Type.Object({
+      reason: Type.Optional(Type.String({ description: "Short description of the completed episode" })),
+    }),
+    async execute(_toolCallId, params) {
+      if (!config.enabled || !config.checkpointReset) {
+        return {
+          content: [{ type: "text", text: "Checkpoint reset is disabled; continue normally." }],
+          details: { queued: false },
+        };
+      }
+      setCheckpointResetRequest(params.reason);
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Checkpoint reset recommendation recorded. No checkpoint was written and no session was changed. After this agent run settles, ask the user to review and invoke /checkpoint-reset if the boundary is still appropriate.",
+          },
+        ],
+        details: {
+          queued: true,
+          ...(checkpointResetReason ? { reason: checkpointResetReason } : {}),
+        },
+      };
+    },
+  });
+
   pi.registerCommand("context-stats", {
     description: "Show local context telemetry",
     handler: async (_args, context) => {
@@ -775,6 +852,56 @@ export default function (pi: ExtensionAPI): void {
         : SEMANTIC_COMPACTION_INSTRUCTIONS;
       if (!requestCompaction(context, "semantic", instructions)) {
         context.ui.notify("No compaction was started (cooldown, already running, or insufficient history)", "info");
+      }
+    },
+  });
+
+  pi.registerCommand("checkpoint-reset", {
+    description: "Archive a completed episode and start a reviewed fresh session",
+    handler: async (args, context) => {
+      if (!config.enabled || !config.checkpointReset) {
+        context.ui.notify("Checkpoint reset is disabled", "warning");
+        return;
+      }
+      const paths = pathSettings ?? (await getPiPathSettings());
+      await runCheckpointReset(args, context, {
+        config,
+        agentDir: paths.agentDir,
+        runCommand: runPiCommand,
+        previousResetCount: telemetry.snapshot(config.compactThresholdTokens).checkpointResets,
+      });
+    },
+  });
+
+  pi.registerCommand("context-checkpoints", {
+    description: "List recent local context checkpoints for this repository",
+    handler: async (_args, context) => {
+      if (!config.enabled || !config.checkpointReset) {
+        context.ui.notify("Checkpoint reset is disabled", "warning");
+        return;
+      }
+
+      const paths = pathSettings ?? (await getPiPathSettings());
+      const state = await getRepositoryState(context.cwd, runPiCommand);
+      try {
+        const directory = getCheckpointStorageDirectory(config, paths.agentDir, context.cwd, state);
+        const checkpoints = await listCheckpointFiles(directory);
+        const details = checkpoints.length === 0
+          ? `No checkpoints found for this repository.\nDirectory: ${directory}`
+          : [
+              `Recent checkpoints (${checkpoints.length}):`,
+              ...checkpoints.map(
+                (checkpoint) => `${checkpoint.createdAt} · ${checkpoint.reason} · ${checkpoint.path}`,
+              ),
+            ].join("\n");
+        if (context.hasUI) {
+          context.ui.notify(details, "info");
+        } else if (config.debug) {
+          console.error(details);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        context.ui.notify(`Could not list checkpoints: ${message}`, "warning");
       }
     },
   });
