@@ -15,6 +15,9 @@ export interface TelemetrySnapshot {
   compactions: number;
   lastCompactionAt: number | null;
   lastCompactionTurn: number | null;
+  checkpointResets: number;
+  lastCheckpointResetAt: number | null;
+  lastCheckpointPath: string | null;
   currentTurn: number;
 }
 
@@ -29,12 +32,24 @@ export class ContextTelemetry {
   private compactions: number;
   private lastCompactionAt: number | null;
   private lastCompactionTurn: number | null;
+  private checkpointResets: number;
+  private lastCheckpointResetAt: number | null;
+  private lastCheckpointPath: string | null;
   private currentTurn = 0;
 
-  constructor(compactions = 0, lastCompactionAt: number | null = null) {
+  constructor(
+    compactions = 0,
+    lastCompactionAt: number | null = null,
+    checkpointResets = 0,
+    lastCheckpointResetAt: number | null = null,
+    lastCheckpointPath: string | null = null,
+  ) {
     this.compactions = compactions;
     this.lastCompactionAt = lastCompactionAt;
     this.lastCompactionTurn = null;
+    this.checkpointResets = checkpointResets;
+    this.lastCheckpointResetAt = lastCheckpointResetAt;
+    this.lastCheckpointPath = lastCheckpointPath;
   }
 
   observe(usage: ContextUsageLike | undefined): void {
@@ -114,6 +129,16 @@ export class ContextTelemetry {
     this.setActiveToolOutputTokens(activeToolOutputTokens);
   }
 
+  markCheckpointReset(timestamp: number, path: string, lineageCount?: number): void {
+    if (lineageCount === undefined) {
+      this.checkpointResets += 1;
+    } else if (Number.isSafeInteger(lineageCount) && lineageCount >= 0) {
+      this.checkpointResets = lineageCount;
+    }
+    this.lastCheckpointResetAt = Number.isFinite(timestamp) ? timestamp : Date.now();
+    this.lastCheckpointPath = path;
+  }
+
   snapshot(compactThresholdTokens: number): TelemetrySnapshot {
     const percentOfThreshold =
       this.contextTokens !== null && compactThresholdTokens > 0
@@ -132,6 +157,9 @@ export class ContextTelemetry {
       compactions: this.compactions,
       lastCompactionAt: this.lastCompactionAt,
       lastCompactionTurn: this.lastCompactionTurn,
+      checkpointResets: this.checkpointResets,
+      lastCheckpointResetAt: this.lastCheckpointResetAt,
+      lastCheckpointPath: this.lastCheckpointPath,
       currentTurn: this.currentTurn,
     };
   }
@@ -170,7 +198,12 @@ export function formatTelemetryDetails(snapshot: TelemetrySnapshot): string {
     `Tool output reduced: ${snapshot.toolOutputsReduced} result(s), approximately ${formatTokenCount(snapshot.toolOutputTokensRemoved)} tokens removed`,
     `Compactions in session: ${snapshot.compactions}`,
     `Last compaction: ${snapshot.lastCompactionAt === null ? "never" : new Date(snapshot.lastCompactionAt).toISOString()}`,
+    `Checkpoint resets in session lineage: ${snapshot.checkpointResets}`,
+    `Last checkpoint reset: ${snapshot.lastCheckpointResetAt === null ? "never" : new Date(snapshot.lastCheckpointResetAt).toISOString()}`,
   ];
+  if (snapshot.lastCheckpointPath !== null) {
+    lines.push(`Last checkpoint path: ${snapshot.lastCheckpointPath}`);
+  }
   if (snapshot.lastCompactionTurn !== null) {
     lines.push(`Last compaction turn: ${snapshot.lastCompactionTurn}`);
   }

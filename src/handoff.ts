@@ -1,10 +1,13 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { BorderedLoader } from "@earendil-works/pi-coding-agent";
 import {
-  BorderedLoader,
-  convertToLlm,
-  serializeConversation,
-  sessionEntryToContextMessages,
-} from "@earendil-works/pi-coding-agent";
+  callContinuationModel,
+  getActiveConversationText,
+  limitText,
+  validateStructuredOutput,
+} from "./continuation.js";
+
+export { getActiveConversationText };
 
 const HANDOFF_SYSTEM_PROMPT = `You are preparing a focused continuation prompt for a new coding-agent session.
 Create a self-contained handoff from the active Pi context and the requested objective.
@@ -36,22 +39,7 @@ const REQUIRED_HANDOFF_HEADINGS = [
 ] as const;
 
 function limitFallbackContext(text: string): string {
-  if (text.length <= MAX_FALLBACK_CONTEXT_CHARS) {
-    return text;
-  }
-  const headLength = Math.floor(MAX_FALLBACK_CONTEXT_CHARS * 0.65);
-  const tailLength = MAX_FALLBACK_CONTEXT_CHARS - headLength;
-  return `${text.slice(0, headLength)}\n\n[Fallback handoff omitted ${text.length - MAX_FALLBACK_CONTEXT_CHARS} characters.]\n\n${text.slice(-tailLength)}`;
-}
-
-export function getActiveConversationText(ctx: ExtensionCommandContext): string {
-  const messages = ctx.sessionManager
-    .buildContextEntries()
-    .flatMap((entry) => sessionEntryToContextMessages(entry));
-  if (messages.length === 0) {
-    return "";
-  }
-  return serializeConversation(convertToLlm(messages));
+  return limitText(text, MAX_FALLBACK_CONTEXT_CHARS, "Fallback handoff");
 }
 
 export function buildFallbackHandoffPrompt(goal: string, conversationText: string): string {
@@ -96,49 +84,14 @@ async function generateHandoffPrompt(
     throw new Error("No model selected");
   }
 
-  const response = await ctx.modelRegistry.complete(
-    ctx.model,
-    {
-      systemPrompt: HANDOFF_SYSTEM_PROMPT,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: `## Active Pi Context\n\n${conversationText}\n\n## Requested Objective\n\n${goal}`,
-            },
-          ],
-          timestamp: Date.now(),
-        },
-      ],
-    },
-    {
-      signal,
-      maxTokens: ctx.model.maxTokens > 0 ? Math.min(4_096, ctx.model.maxTokens) : 4_096,
-      cacheRetention: "none",
-    },
+  const text = await callContinuationModel(
+    ctx,
+    HANDOFF_SYSTEM_PROMPT,
+    `## Active Pi Context\n\n${conversationText}\n\n## Requested Objective\n\n${goal}`,
+    signal,
+    4_096,
   );
-
-  if (response.stopReason === "aborted") {
-    throw new Error("Handoff generation cancelled");
-  }
-  if (response.stopReason === "error" || response.stopReason === "length") {
-    throw new Error(response.errorMessage ?? "Handoff generation did not complete");
-  }
-
-  const text = response.content
-    .filter((part): part is { type: "text"; text: string } => part.type === "text")
-    .map((part) => part.text)
-    .join("\n")
-    .trim();
-  if (!text) {
-    throw new Error("Handoff generation returned an empty prompt");
-  }
-  if (REQUIRED_HANDOFF_HEADINGS.some((heading) => !text.includes(heading))) {
-    throw new Error("Handoff generation returned an incomplete structured prompt");
-  }
-  return text;
+  return validateStructuredOutput(text, REQUIRED_HANDOFF_HEADINGS, "Handoff");
 }
 
 export async function runHandoff(goal: string, ctx: ExtensionCommandContext): Promise<void> {
