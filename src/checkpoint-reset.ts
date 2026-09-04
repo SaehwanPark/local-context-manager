@@ -336,17 +336,15 @@ function formatCheckpointMetadata(input: CheckpointResetInput): string {
 }
 
 function extractSection(text: string, heading: string, headings: readonly string[]): string {
-  const start = text.indexOf(heading);
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === heading);
   if (start < 0) {
     return "unknown";
   }
-  const contentStart = start + heading.length;
-  const nextHeading = headings
-    .filter((candidate) => candidate !== heading)
-    .map((candidate) => text.indexOf(candidate, contentStart))
-    .filter((index) => index >= 0)
-    .sort((a, b) => a - b)[0];
-  const content = text.slice(contentStart, nextHeading ?? text.length).trim();
+  const nextHeading = lines.findIndex(
+    (line, lineIndex) => lineIndex > start && headings.includes(line.trim()),
+  );
+  const content = lines.slice(start + 1, nextHeading < 0 ? lines.length : nextHeading).join("\n").trim();
   return content || "unknown";
 }
 

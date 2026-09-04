@@ -98,22 +98,19 @@ export function validateStructuredOutput(
     throw new Error(`${label} generation returned an empty result`);
   }
   const lines = normalized.split(/\r?\n/);
-  let nextHeadingLine = 0;
+  const headingLines = lines
+    .map((line, lineIndex) => ({ line: line.trim(), lineIndex }))
+    .filter(({ line }) => requiredHeadings.includes(line));
+  if (requiredHeadings.length > 0 && headingLines[0]?.lineIndex !== 0) {
+    throw new Error(`${label} generation returned an unexpected preamble`);
+  }
+  if (headingLines.length !== requiredHeadings.length) {
+    throw new Error(`${label} generation returned incomplete structured output`);
+  }
   for (let index = 0; index < requiredHeadings.length; index += 1) {
-    const heading = requiredHeadings[index];
-    const headingLine = lines.findIndex(
-      (line, lineIndex) => lineIndex >= nextHeadingLine && line.trim() === heading,
-    );
-    if (headingLine < 0) {
-      if (index === 0) {
-        throw new Error(`${label} generation returned an unexpected preamble`);
-      }
+    if (headingLines[index]?.line !== requiredHeadings[index]) {
       throw new Error(`${label} generation returned incomplete structured output`);
     }
-    if (index === 0 && headingLine !== 0) {
-      throw new Error(`${label} generation returned an unexpected preamble`);
-    }
-    nextHeadingLine = headingLine + 1;
   }
   return normalized;
 }
