@@ -103,7 +103,10 @@ function applyLayer(
 
   if ("checkpointDirectory" in values) {
     const value = values.checkpointDirectory;
-    if (value !== null && (typeof value !== "string" || !value.trim() || value.includes("\0"))) {
+    if (
+      value !== null &&
+      (typeof value !== "string" || !value.trim() || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(value))
+    ) {
       errors.push(
         `Ignoring checkpointDirectory${describeSource(source)}: expected a non-empty string or null`,
       );

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, chmod, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, link, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import type {
@@ -143,7 +143,7 @@ function errorCode(error: unknown): string | undefined {
 }
 
 function knownOrUnknown(value: string | undefined): string {
-  return value?.trim() || "unknown";
+  return value?.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").trim() || "unknown";
 }
 
 async function gitOutput(
@@ -212,7 +212,7 @@ export function resolveCheckpointDirectory(
   }
 
   const configured = config.checkpointDirectory.trim();
-  if (!configured || configured.includes("\0") || /[\r\n]/.test(configured)) {
+  if (!configured || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(configured)) {
     throw new Error("checkpointDirectory is not a valid path");
   }
   const expanded = expandHome(configured);
@@ -276,6 +276,7 @@ export async function writeCheckpointAtomically(path: string, content: string): 
   const directory = dirname(path);
   const temporaryPath = join(directory, `.${basename(path)}.${randomUUID()}.tmp`);
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
 
   try {
     await access(path).then(
@@ -294,7 +295,17 @@ export async function writeCheckpointAtomically(path: string, content: string): 
       mode: 0o600,
     });
     await chmod(temporaryPath, 0o600);
-    await rename(temporaryPath, path);
+    try {
+      // rename() would replace a file if another reset chose this path first.
+      // A hard link publishes the completed file atomically without clobbering it.
+      await link(temporaryPath, path);
+    } catch (error) {
+      if (errorCode(error) === "EEXIST") {
+        throw new Error(`Checkpoint already exists: ${path}`);
+      }
+      throw error;
+    }
+    await rm(temporaryPath);
   } catch (error) {
     await rm(temporaryPath, { force: true }).catch(() => undefined);
     throw error;
@@ -519,7 +530,7 @@ function reasonFromFilename(filename: string): string {
   const withoutExtension = filename.endsWith(".md") ? filename.slice(0, -3) : filename;
   const separator = withoutExtension.indexOf("Z-");
   const reason = separator >= 0 ? withoutExtension.slice(separator + 2) : withoutExtension;
-  return reason.replace(/-\d+$/, "").replace(/-/g, " ") || "unknown";
+  return cleanReason(reason.replace(/-\d+$/, "").replace(/-/g, " ")) ?? "unknown";
 }
 
 export async function listCheckpointFiles(directory: string): Promise<CheckpointListing[]> {
@@ -547,10 +558,10 @@ export async function listCheckpointFiles(directory: string): Promise<Checkpoint
         const createdMatch = content.match(/^- Created:\s*(.+)$/m);
         const reasonMatch = content.match(/^- Reason:\s*(.+)$/m);
         if (createdMatch?.[1]) {
-          createdAt = createdMatch[1].trim();
+          createdAt = knownOrUnknown(createdMatch[1]);
         }
         if (reasonMatch?.[1]) {
-          reason = reasonMatch[1].trim();
+          reason = cleanReason(reasonMatch[1]) ?? "unknown";
         }
       } catch {
         // A single unreadable checkpoint should not hide the other local files.

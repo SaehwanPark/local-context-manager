@@ -538,7 +538,7 @@ export default function (pi: ExtensionAPI): void {
     }
   };
 
-  pi.on("session_start", async (_event, context) => {
+  pi.on("session_start", async (event, context) => {
     const paths = await getPiPathSettings();
     pathSettings = paths;
     const loaded = await loadConfig({
@@ -579,6 +579,22 @@ export default function (pi: ExtensionAPI): void {
     observeContext(context, config, telemetry, gate);
     if (branch.some((entry) => entry.type === "compaction") && activeEntries.length > 0) {
       telemetry.setCompactionBaseline(estimateActiveContextTokens(activeEntries));
+    }
+
+    if (event.reason === "new") {
+      // newSession() runs its setup callback after session_start, so recover the
+      // reset marker once the new session's append-only state is available.
+      setImmediate(() => {
+        try {
+          const latestReset = getLatestCheckpointResetRecord(context.sessionManager.getBranch());
+          if (latestReset) {
+            telemetry.markCheckpointReset(latestReset.createdAt, latestReset.path, latestReset.count);
+            updateStatus(context, config, telemetry);
+          }
+        } catch (error) {
+          debugLog(config, "could not restore checkpoint reset telemetry", error);
+        }
+      });
     }
 
     if (loaded.errors.length > 0) {

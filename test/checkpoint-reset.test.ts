@@ -191,6 +191,23 @@ describe("checkpoint storage", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("does not clobber when two writers publish the same checkpoint concurrently", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "local-context-manager-checkpoint-test-"));
+    try {
+      const path = join(directory, "concurrent.md");
+      const results = await Promise.allSettled([
+        writeCheckpointAtomically(path, "first"),
+        writeCheckpointAtomically(path, "second"),
+      ]);
+
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+      expect(["first", "second"]).toContain(await readFile(path, "utf8"));
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("repository metadata and reset records", () => {

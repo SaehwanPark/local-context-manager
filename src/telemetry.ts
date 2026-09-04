@@ -129,8 +129,12 @@ export class ContextTelemetry {
     this.setActiveToolOutputTokens(activeToolOutputTokens);
   }
 
-  markCheckpointReset(timestamp: number, path: string): void {
-    this.checkpointResets += 1;
+  markCheckpointReset(timestamp: number, path: string, lineageCount?: number): void {
+    if (lineageCount === undefined) {
+      this.checkpointResets += 1;
+    } else if (Number.isSafeInteger(lineageCount) && lineageCount >= 0) {
+      this.checkpointResets = lineageCount;
+    }
     this.lastCheckpointResetAt = Number.isFinite(timestamp) ? timestamp : Date.now();
     this.lastCheckpointPath = path;
   }

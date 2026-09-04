@@ -31,7 +31,10 @@ export function limitText(text: string, maxChars: number, omissionLabel: string)
 }
 
 export function cleanReason(value: string | undefined): string | undefined {
-  const reason = value?.replace(/\s+/g, " ").trim();
+  const reason = value
+    ?.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   return reason ? reason.slice(0, 240) : undefined;
 }
 
@@ -94,12 +97,23 @@ export function validateStructuredOutput(
   if (!normalized) {
     throw new Error(`${label} generation returned an empty result`);
   }
-  if (requiredHeadings.length > 0 && !normalized.startsWith(requiredHeadings[0])) {
-    throw new Error(`${label} generation returned an unexpected preamble`);
-  }
-  const missing = requiredHeadings.filter((heading) => !normalized.includes(heading));
-  if (missing.length > 0) {
-    throw new Error(`${label} generation returned incomplete structured output`);
+  const lines = normalized.split(/\r?\n/);
+  let nextHeadingLine = 0;
+  for (let index = 0; index < requiredHeadings.length; index += 1) {
+    const heading = requiredHeadings[index];
+    const headingLine = lines.findIndex(
+      (line, lineIndex) => lineIndex >= nextHeadingLine && line.trim() === heading,
+    );
+    if (headingLine < 0) {
+      if (index === 0) {
+        throw new Error(`${label} generation returned an unexpected preamble`);
+      }
+      throw new Error(`${label} generation returned incomplete structured output`);
+    }
+    if (index === 0 && headingLine !== 0) {
+      throw new Error(`${label} generation returned an unexpected preamble`);
+    }
+    nextHeadingLine = headingLine + 1;
   }
   return normalized;
 }
