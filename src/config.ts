@@ -1,7 +1,17 @@
 import { readFile } from "node:fs/promises";
 
+export type ContextProfile = "aggressive" | "balanced" | "relaxed";
+
+export interface ContextThresholds {
+  softWarningTokens: number;
+  compactThresholdTokens: number;
+  hardCeilingTokens: number;
+  keepRecentTokens: number;
+}
+
 export interface LocalContextManagerConfig {
   enabled: boolean;
+  contextProfile: ContextProfile;
   softWarningTokens: number;
   compactThresholdTokens: number;
   hardCeilingTokens: number;
@@ -14,12 +24,34 @@ export interface LocalContextManagerConfig {
   debug: boolean;
 }
 
+export const CONTEXT_PROFILE_THRESHOLDS: Readonly<Record<ContextProfile, Readonly<ContextThresholds>>> = Object.freeze({
+  aggressive: Object.freeze({
+    keepRecentTokens: 8_000,
+    softWarningTokens: 16_000,
+    compactThresholdTokens: 24_000,
+    hardCeilingTokens: 36_000,
+  }),
+  balanced: Object.freeze({
+    keepRecentTokens: 10_000,
+    softWarningTokens: 24_000,
+    compactThresholdTokens: 32_000,
+    hardCeilingTokens: 48_000,
+  }),
+  relaxed: Object.freeze({
+    keepRecentTokens: 12_000,
+    softWarningTokens: 36_000,
+    compactThresholdTokens: 48_000,
+    hardCeilingTokens: 72_000,
+  }),
+});
+
 export const DEFAULT_CONFIG: Readonly<LocalContextManagerConfig> = Object.freeze({
   enabled: true,
-  softWarningTokens: 24_000,
-  compactThresholdTokens: 32_000,
-  hardCeilingTokens: 48_000,
-  keepRecentTokens: 10_000,
+  contextProfile: "balanced",
+  softWarningTokens: CONTEXT_PROFILE_THRESHOLDS.balanced.softWarningTokens,
+  compactThresholdTokens: CONTEXT_PROFILE_THRESHOLDS.balanced.compactThresholdTokens,
+  hardCeilingTokens: CONTEXT_PROFILE_THRESHOLDS.balanced.hardCeilingTokens,
+  keepRecentTokens: CONTEXT_PROFILE_THRESHOLDS.balanced.keepRecentTokens,
   toolOutputReduction: true,
   semanticCompaction: true,
   handoff: true,
@@ -40,6 +72,7 @@ export interface LoadConfigOptions {
   allowProjectConfig?: boolean;
 }
 
+const CONTEXT_PROFILE_KEYS = ["aggressive", "balanced", "relaxed"] as const;
 const BOOLEAN_KEYS = [
   "enabled",
   "toolOutputReduction",
@@ -58,8 +91,65 @@ const NUMBER_KEYS = [
 type RecordValue = Record<string, unknown>;
 type NumberConfigKey = (typeof NUMBER_KEYS)[number];
 
+function isContextProfile(value: unknown): value is ContextProfile {
+  return typeof value === "string" && (CONTEXT_PROFILE_KEYS as readonly string[]).includes(value);
+}
+
 function isRecord(value: unknown): value is RecordValue {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Four ordered positive thresholds need a little room; real model windows are far larger.
+const MIN_ADAPTIVE_CONTEXT_WINDOW = 8;
+const CONTEXT_WINDOW_FRACTIONS = Object.freeze({
+  keepRecentTokens: 0.125,
+  softWarningTokens: 0.25,
+  compactThresholdTokens: 0.5,
+  hardCeilingTokens: 0.75,
+});
+
+/**
+ * Keep the configured policy as-is for normal and large windows, while reserving
+ * room for the next turn on constrained models. The fractions deliberately only
+ * lower thresholds; a large advertised window must not silently expand a user's
+ * preferred working context.
+ */
+export function getEffectiveThresholds(
+  config: LocalContextManagerConfig,
+  contextWindow?: number,
+): ContextThresholds {
+  const configured: ContextThresholds = {
+    keepRecentTokens: config.keepRecentTokens,
+    softWarningTokens: config.softWarningTokens,
+    compactThresholdTokens: config.compactThresholdTokens,
+    hardCeilingTokens: config.hardCeilingTokens,
+  };
+  if (
+    typeof contextWindow !== "number" ||
+    !Number.isFinite(contextWindow) ||
+    contextWindow < MIN_ADAPTIVE_CONTEXT_WINDOW
+  ) {
+    return configured;
+  }
+
+  return {
+    keepRecentTokens: Math.min(
+      configured.keepRecentTokens,
+      Math.floor(contextWindow * CONTEXT_WINDOW_FRACTIONS.keepRecentTokens),
+    ),
+    softWarningTokens: Math.min(
+      configured.softWarningTokens,
+      Math.floor(contextWindow * CONTEXT_WINDOW_FRACTIONS.softWarningTokens),
+    ),
+    compactThresholdTokens: Math.min(
+      configured.compactThresholdTokens,
+      Math.floor(contextWindow * CONTEXT_WINDOW_FRACTIONS.compactThresholdTokens),
+    ),
+    hardCeilingTokens: Math.min(
+      configured.hardCeilingTokens,
+      Math.floor(contextWindow * CONTEXT_WINDOW_FRACTIONS.hardCeilingTokens),
+    ),
+  };
 }
 
 function configObject(value: unknown): RecordValue | undefined {
@@ -89,6 +179,23 @@ function applyLayer(
 
   const candidate = { ...base };
   const changedNumbers = new Set<NumberConfigKey>();
+
+  if ("contextProfile" in values) {
+    const value = values.contextProfile;
+    if (!isContextProfile(value)) {
+      errors.push(`Ignoring contextProfile${describeSource(source)}: expected aggressive, balanced, or relaxed`);
+    } else {
+      candidate.contextProfile = value;
+      Object.assign(candidate, CONTEXT_PROFILE_THRESHOLDS[value]);
+    }
+  }
+
+  const numericBase: ContextThresholds = {
+    keepRecentTokens: candidate.keepRecentTokens,
+    softWarningTokens: candidate.softWarningTokens,
+    compactThresholdTokens: candidate.compactThresholdTokens,
+    hardCeilingTokens: candidate.hardCeilingTokens,
+  };
 
   for (const key of BOOLEAN_KEYS) {
     if (!(key in values)) {
@@ -149,18 +256,18 @@ function applyLayer(
       const lowerChanged = changedNumbers.has(lowerKey);
       const upperChanged = changedNumbers.has(upperKey);
       if (lowerChanged && !upperChanged) {
-        candidate[lowerKey] = base[lowerKey];
+        candidate[lowerKey] = numericBase[lowerKey];
         changedNumbers.delete(lowerKey);
       } else if (upperChanged && !lowerChanged) {
-        candidate[upperKey] = base[upperKey];
+        candidate[upperKey] = numericBase[upperKey];
         changedNumbers.delete(upperKey);
       } else {
         if (!lowerChanged && !upperChanged) {
           changed = false;
           break;
         }
-        candidate[lowerKey] = base[lowerKey];
-        candidate[upperKey] = base[upperKey];
+        candidate[lowerKey] = numericBase[lowerKey];
+        candidate[upperKey] = numericBase[upperKey];
         changedNumbers.delete(lowerKey);
         changedNumbers.delete(upperKey);
       }

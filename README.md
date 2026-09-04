@@ -18,11 +18,12 @@ Start (or reload) Pi in your project, then try:
 /context-stats
 ```
 
-The extension works with Pi's existing models and configuration. It does not install a model or change Pi's emergency compaction authority. To pin this release, use `npm:local-context-manager@0.3.0`.
+The extension works with Pi's existing models and configuration. It does not install a model or change Pi's emergency compaction authority. The latest published release can be pinned with `npm:local-context-manager@0.3.0`.
 
 ## What it adds
 
 - telemetry for context size, compaction, and reduced tool output;
+- balanced-by-default context profiles (`aggressive`, `balanced`, `relaxed`) with automatic downward adaptation for small model windows;
 - guarded proactive compaction at safe idle boundaries;
 - conservative reduction of only new oversized tool results, with a recovery path;
 - intentional phase compaction with `/compact-phase`;

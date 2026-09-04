@@ -23,8 +23,12 @@ import {
 } from "./checkpoint-reset.js";
 import { getRearmTokens, CompactionGate, shouldTriggerThresholdCompaction } from "./policy.js";
 import {
+  CONTEXT_PROFILE_THRESHOLDS,
   DEFAULT_CONFIG,
+  getEffectiveThresholds,
   loadConfig,
+  type ContextProfile,
+  type ContextThresholds,
   type LocalContextManagerConfig,
 } from "./config.js";
 import {
@@ -47,6 +51,11 @@ const SEMANTIC_PARAMETERS = Type.Object({
 });
 
 type CompactionRequestReason = "threshold" | "semantic";
+
+interface ObservedContext {
+  tokens: number | null;
+  thresholds: ContextThresholds;
+}
 
 interface PiPathSettings {
   agentDir: string;
@@ -239,13 +248,22 @@ async function saveRecoveryCopy(text: string): Promise<string | undefined> {
   }
 }
 
-function statusWithCeiling(
+function resolveThresholds(
+  context: ExtensionContext,
   config: LocalContextManagerConfig,
   telemetry: ContextTelemetry,
+): ContextThresholds {
+  const contextWindow = telemetry.snapshot(config.compactThresholdTokens).contextWindow ?? context.model?.contextWindow;
+  return getEffectiveThresholds(config, contextWindow);
+}
+
+function statusWithCeiling(
+  telemetry: ContextTelemetry,
+  thresholds: ContextThresholds,
 ): string {
-  const snapshot = telemetry.snapshot(config.compactThresholdTokens);
+  const snapshot = telemetry.snapshot(thresholds.compactThresholdTokens);
   const status = formatTelemetryStatus(snapshot);
-  return snapshot.contextTokens !== null && snapshot.contextTokens >= config.hardCeilingTokens
+  return snapshot.contextTokens !== null && snapshot.contextTokens >= thresholds.hardCeilingTokens
     ? `${status} · hard ceiling`
     : status;
 }
@@ -254,13 +272,15 @@ function updateStatus(
   context: ExtensionContext,
   config: LocalContextManagerConfig,
   telemetry: ContextTelemetry,
+  thresholds?: ContextThresholds,
 ): void {
   if (!context.hasUI) {
     return;
   }
+  const activeThresholds = thresholds ?? resolveThresholds(context, config, telemetry);
   context.ui.setStatus(
     EXTENSION_STATUS_KEY,
-    config.enabled ? statusWithCeiling(config, telemetry) : "off",
+    config.enabled ? statusWithCeiling(telemetry, activeThresholds) : "off",
   );
 }
 
@@ -269,7 +289,7 @@ function observeContext(
   config: LocalContextManagerConfig,
   telemetry: ContextTelemetry,
   gate: CompactionGate,
-): number | null {
+): ObservedContext {
   const usage = context.getContextUsage();
   telemetry.observe(usage);
   if (usage?.tokens == null) {
@@ -282,10 +302,12 @@ function observeContext(
       debugLog(config, "could not estimate active context", error);
     }
   }
-  const snapshot = telemetry.snapshot(config.compactThresholdTokens);
+  const thresholds = resolveThresholds(context, config, telemetry);
+  gate.setRearmTokens(getRearmTokens(thresholds.softWarningTokens, thresholds.compactThresholdTokens));
+  const snapshot = telemetry.snapshot(thresholds.compactThresholdTokens);
   gate.observe(snapshot.contextTokens);
-  updateStatus(context, config, telemetry);
-  return snapshot.contextTokens;
+  updateStatus(context, config, telemetry, thresholds);
+  return { tokens: snapshot.contextTokens, thresholds };
 }
 
 function notifySoftWarning(
@@ -293,9 +315,10 @@ function notifySoftWarning(
   config: LocalContextManagerConfig,
   telemetry: ContextTelemetry,
   warned: { value: boolean },
-  tokens: number | null,
+  observed: ObservedContext,
 ): void {
-  if (tokens === null || warned.value || tokens < config.softWarningTokens) {
+  const { tokens, thresholds } = observed;
+  if (tokens === null || warned.value || tokens < thresholds.softWarningTokens) {
     return;
   }
   warned.value = true;
@@ -306,7 +329,23 @@ function notifySoftWarning(
     );
   }
   debugLog(config, `soft warning at ${tokens} tokens`);
-  updateStatus(context, config, telemetry);
+  updateStatus(context, config, telemetry, thresholds);
+}
+
+function parseContextProfile(value: string): ContextProfile | undefined {
+  if (value === "aggressive" || value === "balanced" || value === "relaxed") {
+    return value;
+  }
+  return undefined;
+}
+
+function formatThresholdSummary(thresholds: ContextThresholds): string {
+  return [
+    `keep ${thresholds.keepRecentTokens.toLocaleString()}`,
+    `warn ${thresholds.softWarningTokens.toLocaleString()}`,
+    `compact ${thresholds.compactThresholdTokens.toLocaleString()}`,
+    `ceiling ${thresholds.hardCeilingTokens.toLocaleString()}`,
+  ].join(" · ");
 }
 
 function buildCompactionOptions(
@@ -326,6 +365,7 @@ async function buildCustomCompaction(
   event: SessionBeforeCompactEvent,
   context: ExtensionContext,
   config: LocalContextManagerConfig,
+  thresholds: ContextThresholds,
 ): Promise<{ compaction: CompactionResult } | undefined> {
   const model = context.model;
   const nativeKeepRecentTokens = event.preparation.settings.keepRecentTokens;
@@ -333,7 +373,7 @@ async function buildCustomCompaction(
     !config.enabled ||
     !model ||
     !Number.isFinite(nativeKeepRecentTokens) ||
-    config.keepRecentTokens >= nativeKeepRecentTokens
+    thresholds.keepRecentTokens >= nativeKeepRecentTokens
   ) {
     return undefined;
   }
@@ -375,7 +415,7 @@ async function buildCustomCompaction(
       event.branchEntries,
       boundaryStart,
       event.branchEntries.length,
-      config.keepRecentTokens,
+      thresholds.keepRecentTokens,
     );
     const firstKeptEntry = event.branchEntries[cutPoint.firstKeptEntryIndex];
     if (!firstKeptEntry?.id) {
@@ -415,7 +455,7 @@ async function buildCustomCompaction(
       fileOps,
       settings: {
         ...event.preparation.settings,
-        keepRecentTokens: config.keepRecentTokens,
+        keepRecentTokens: thresholds.keepRecentTokens,
       },
     };
 
@@ -558,8 +598,9 @@ export default function (pi: ExtensionAPI): void {
       checkpointReset?.createdAt ?? null,
       checkpointReset?.path ?? null,
     );
+    const initialThresholds = getEffectiveThresholds(config, context.model?.contextWindow);
     gate = new CompactionGate({
-      rearmTokens: getRearmTokens(config.softWarningTokens, config.compactThresholdTokens),
+      rearmTokens: getRearmTokens(initialThresholds.softWarningTokens, initialThresholds.compactThresholdTokens),
     });
     warned.value = false;
     turnSerial = 0;
@@ -615,13 +656,13 @@ export default function (pi: ExtensionAPI): void {
   pi.on("turn_start", (_event, context) => {
     turnSerial += 1;
     telemetry.markTurn(turnSerial);
-    const tokens = observeContext(context, config, telemetry, gate);
-    notifySoftWarning(context, config, telemetry, warned, tokens);
+    const observed = observeContext(context, config, telemetry, gate);
+    notifySoftWarning(context, config, telemetry, warned, observed);
   });
 
   pi.on("turn_end", (_event, context) => {
-    const tokens = observeContext(context, config, telemetry, gate);
-    notifySoftWarning(context, config, telemetry, warned, tokens);
+    const observed = observeContext(context, config, telemetry, gate);
+    notifySoftWarning(context, config, telemetry, warned, observed);
 
     // turn_end is the first boundary after all tool results have landed. Only use
     // it when the host reports idle; a continuing tool loop is handled at
@@ -630,15 +671,15 @@ export default function (pi: ExtensionAPI): void {
       config.enabled &&
       !semanticRequested &&
       context.isIdle() &&
-      shouldTriggerThresholdCompaction(tokens, config.compactThresholdTokens)
+      shouldTriggerThresholdCompaction(observed.tokens, observed.thresholds.compactThresholdTokens)
     ) {
       requestCompaction(context, "threshold");
     }
   });
 
   pi.on("agent_settled", (_event, context) => {
-    const tokens = observeContext(context, config, telemetry, gate);
-    notifySoftWarning(context, config, telemetry, warned, tokens);
+    const observed = observeContext(context, config, telemetry, gate);
+    notifySoftWarning(context, config, telemetry, warned, observed);
 
     if (checkpointResetRequested) {
       const reason = checkpointResetReason;
@@ -662,13 +703,14 @@ export default function (pi: ExtensionAPI): void {
       );
       return;
     }
-    if (config.enabled && shouldTriggerThresholdCompaction(tokens, config.compactThresholdTokens)) {
+    if (config.enabled && shouldTriggerThresholdCompaction(observed.tokens, observed.thresholds.compactThresholdTokens)) {
       requestCompaction(context, "threshold");
     }
   });
 
   pi.on("session_compact", (event, context) => {
     const usage = context.getContextUsage();
+    telemetry.observe(usage);
     let activeEntries: SessionEntry[] = [];
     let activeToolOutputTokens = 0;
     try {
@@ -686,12 +728,14 @@ export default function (pi: ExtensionAPI): void {
       postTokens,
       activeToolOutputTokens,
     );
+    const thresholds = resolveThresholds(context, config, telemetry);
+    gate.setRearmTokens(getRearmTokens(thresholds.softWarningTokens, thresholds.compactThresholdTokens));
     gate.complete(postTokens, turnSerial);
     requestedCompaction = undefined;
     semanticRequested = false;
     semanticReason = undefined;
     warned.value = false;
-    updateStatus(context, config, telemetry);
+    updateStatus(context, config, telemetry, thresholds);
     debugLog(config, `compaction completed (${event.reason})`);
   });
 
@@ -766,7 +810,7 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_before_compact", async (event, context) => {
-    return buildCustomCompaction(event, context, config);
+    return buildCustomCompaction(event, context, config, resolveThresholds(context, config, telemetry));
   });
 
   pi.registerTool({
@@ -837,14 +881,68 @@ export default function (pi: ExtensionAPI): void {
   pi.registerCommand("context-stats", {
     description: "Show local context telemetry",
     handler: async (_args, context) => {
-      const tokens = observeContext(context, config, telemetry, gate);
-      const snapshot = telemetry.snapshot(config.compactThresholdTokens);
+      const observed = observeContext(context, config, telemetry, gate);
+      const snapshot = telemetry.snapshot(observed.thresholds.compactThresholdTokens);
       const details = [
         formatTelemetryDetails(snapshot),
-        `Soft warning: ${config.softWarningTokens.toLocaleString()} tokens`,
-        `Hard ceiling: ${config.hardCeilingTokens.toLocaleString()} tokens`,
+        `Context mode: ${config.contextProfile}`,
+        `Effective thresholds: ${formatThresholdSummary(observed.thresholds)}`,
+        `Soft warning: ${observed.thresholds.softWarningTokens.toLocaleString()} tokens`,
+        `Hard ceiling: ${observed.thresholds.hardCeilingTokens.toLocaleString()} tokens`,
         `Enabled: ${config.enabled ? "yes" : "no"}`,
-        `Current reading: ${tokens === null ? "unknown" : `${Math.round(tokens).toLocaleString()} tokens`}`,
+        `Current reading: ${observed.tokens === null ? "unknown" : `${Math.round(observed.tokens).toLocaleString()} tokens`}`,
+      ].join("\n");
+      if (context.hasUI) {
+        context.ui.notify(details, "info");
+      } else if (config.debug) {
+        console.error(details);
+      }
+    },
+  });
+
+  pi.registerCommand("context-mode", {
+    description: "Show or set context mode: aggressive, balanced, or relaxed",
+    handler: async (args, context) => {
+      const requested = args.trim().toLowerCase();
+      if (!requested) {
+        const observed = observeContext(context, config, telemetry, gate);
+        const snapshot = telemetry.snapshot(observed.thresholds.compactThresholdTokens);
+        const details = [
+          `Context mode: ${config.contextProfile}`,
+          `Effective thresholds: ${formatThresholdSummary(observed.thresholds)}`,
+          `Context window: ${snapshot.contextWindow === null ? "not reported" : `${Math.round(snapshot.contextWindow).toLocaleString()} tokens`}`,
+        ].join("\n");
+        if (context.hasUI) {
+          context.ui.notify(details, "info");
+        } else if (config.debug) {
+          console.error(details);
+        }
+        return;
+      }
+
+      const profile = parseContextProfile(requested);
+      if (!profile) {
+        if (context.hasUI) {
+          context.ui.notify("Usage: /context-mode [aggressive|balanced|relaxed]", "error");
+        } else {
+          debugLog(config, "Usage: /context-mode [aggressive|balanced|relaxed]");
+        }
+        return;
+      }
+
+      config = {
+        ...config,
+        contextProfile: profile,
+        ...CONTEXT_PROFILE_THRESHOLDS[profile],
+      };
+      warned.value = false;
+      const observed = observeContext(context, config, telemetry, gate);
+      const snapshot = telemetry.snapshot(observed.thresholds.compactThresholdTokens);
+      const details = [
+        `Context mode set to ${profile} for this session.`,
+        `Effective thresholds: ${formatThresholdSummary(observed.thresholds)}`,
+        `Context window: ${snapshot.contextWindow === null ? "not reported" : `${Math.round(snapshot.contextWindow).toLocaleString()} tokens`}`,
+        `To make it persistent, set \"contextProfile\": \"${profile}\" in local-context-manager.json.`,
       ].join("\n");
       if (context.hasUI) {
         context.ui.notify(details, "info");

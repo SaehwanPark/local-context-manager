@@ -21,7 +21,23 @@ Run:
 
 Look for the current reading, threshold progress, active reduced tool-output tokens, and compaction count. The value can be an estimate or temporarily unknown. It is a signal for deciding what to do, not a promise of exact provider accounting.
 
-### 2. Keep working until a meaningful phase ends
+### 2. Choose a mode only if you notice a symptom
+
+The default `balanced` mode needs no setup. If a long session becomes noticeably slower, choose the more conservative bundle:
+
+```text
+/context-mode aggressive
+```
+
+If compaction feels too frequent while long prompts remain comfortable, choose:
+
+```text
+/context-mode relaxed
+```
+
+Use `/context-mode balanced` to return to the default. The command applies only to the current session; set `contextProfile` in the configuration file when you want the choice to persist. Pi's reported model context window can lower thresholds automatically for small-window models, so you do not need to calculate fractions yourself.
+
+### 3. Keep working until a meaningful phase ends
 
 Do not compact after every small edit. A phase might be “implementation complete,” “tests now pass,” or “investigation narrowed to one fix.” At that boundary, either let the extension's proactive policy help or request a focused compaction:
 
@@ -39,7 +55,7 @@ Pi's normal command remains available:
 
 Use it when you want Pi's ordinary compaction behavior or a custom instruction.
 
-### 3. Choose a fresh-session workflow only at a real boundary
+### 4. Choose a fresh-session workflow only at a real boundary
 
 Use `/handoff` when the next task is a substantially different focus:
 
@@ -104,6 +120,7 @@ The default storage location is outside the repository:
 
 - **Tool-output reduction:** eligible oversized new results can be shortened. Source reads and small results are preserved. The replacement includes a recovery path when one is available; open that file when you need the full output.
 - **Proactive compaction:** once the threshold is reached, a request may run at a safe idle boundary. Hysteresis, cooldown, and an in-flight gate prevent repeated compaction attempts.
+- **Adaptive thresholds:** the active profile is automatically lowered for constrained reported context windows, but never raised for a large advertised window.
 - **Telemetry:** status and `/context-stats` update as usage, compactions, and reductions change.
 
 If an optional operation fails, the extension prefers the original context and reports the failure rather than silently dropping work.

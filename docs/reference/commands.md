@@ -13,7 +13,8 @@ Type these commands into Pi's editor. The extension registers them when the pack
 
 | Command | Use it for | Does it change the session? |
 | --- | --- | --- |
-| `/context-stats` | View context reading/estimate, threshold details, reductions, and compaction history | No. It only reports telemetry. |
+| `/context-stats` | View context reading/estimate, active mode, effective thresholds, reductions, and compaction history | No. It only reports telemetry. |
+| `/context-mode [profile]` | Show the current mode or choose `aggressive`, `balanced`, or `relaxed` for this session | It changes this session's policy only; it does not edit a file. |
 | `/compact-phase [reason]` | Compact after a meaningful phase, such as `tests pass` or `implementation complete` | It may add Pi's normal compaction entry after Pi is idle. |
 | `/handoff <objective>` | Begin a fresh session focused on a new objective | Only after you review the generated prompt and the new-session transition succeeds. |
 | `/checkpoint-reset [reason]` | Archive a completed semantic episode and continue with a small capsule | Only after you review both artifacts and explicitly approve. |
@@ -28,6 +29,21 @@ Inspect the session:
 ```text
 /context-stats
 ```
+
+Choose a more conservative policy when a long local-model session becomes slow:
+
+```text
+/context-mode aggressive
+```
+
+Return to the default or allow longer working contexts:
+
+```text
+/context-mode balanced
+/context-mode relaxed
+```
+
+To persist a choice across sessions, set `contextProfile` in `local-context-manager.json`; see [Configuration]({{ '/reference/configuration.html' | relative_url }}).
 
 Mark the end of a phase:
 
@@ -54,6 +70,8 @@ Find local archives:
 ```
 
 Reasons are short labels for the generated summary and filename. Do not put secrets in a reason; checkpoint content can already contain sensitive project details.
+
+`aggressive` is for sluggish growing sessions, `balanced` is the default, and `relaxed` is for sessions that compact more often than needed. Pi's reported context-window size can lower any of these profiles for constrained models, but it never raises them automatically.
 
 ## Model-facing tools
 

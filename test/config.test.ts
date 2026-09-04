@@ -2,7 +2,13 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CONFIG, loadConfig, parseConfig } from "../src/config.js";
+import {
+  CONTEXT_PROFILE_THRESHOLDS,
+  DEFAULT_CONFIG,
+  getEffectiveThresholds,
+  loadConfig,
+  parseConfig,
+} from "../src/config.js";
 
 describe("configuration", () => {
   it("uses safe defaults and rejects invalid token ordering", () => {
@@ -16,6 +22,49 @@ describe("configuration", () => {
 
     expect(parsed.config).toEqual(DEFAULT_CONFIG);
     expect(parsed.errors.length).toBeGreaterThan(0);
+  });
+
+  it("applies a profile bundle while allowing valid advanced overrides", () => {
+    const aggressive = parseConfig({ contextProfile: "aggressive" });
+    expect(aggressive.config.contextProfile).toBe("aggressive");
+    expect(aggressive.config).toMatchObject(CONTEXT_PROFILE_THRESHOLDS.aggressive);
+
+    const custom = parseConfig({
+      contextProfile: "aggressive",
+      compactThresholdTokens: 20_000,
+    });
+    expect(custom.config.contextProfile).toBe("aggressive");
+    expect(custom.config.keepRecentTokens).toBe(8_000);
+    expect(custom.config.compactThresholdTokens).toBe(20_000);
+    expect(custom.errors).toEqual([]);
+
+    const invalid = parseConfig({ contextProfile: "turbo" });
+    expect(invalid.config).toEqual(DEFAULT_CONFIG);
+    expect(invalid.errors.join(" ")).toContain("contextProfile");
+  });
+
+  it("scales thresholds down for small context windows but never up", () => {
+    expect(getEffectiveThresholds(DEFAULT_CONFIG, 16_000)).toEqual({
+      keepRecentTokens: 2_000,
+      softWarningTokens: 4_000,
+      compactThresholdTokens: 8_000,
+      hardCeilingTokens: 12_000,
+    });
+    expect(getEffectiveThresholds(DEFAULT_CONFIG, 64_000)).toEqual({
+      keepRecentTokens: 8_000,
+      softWarningTokens: 16_000,
+      compactThresholdTokens: 32_000,
+      hardCeilingTokens: 48_000,
+    });
+    expect(getEffectiveThresholds(DEFAULT_CONFIG, 128_000)).toEqual({
+      keepRecentTokens: DEFAULT_CONFIG.keepRecentTokens,
+      softWarningTokens: DEFAULT_CONFIG.softWarningTokens,
+      compactThresholdTokens: DEFAULT_CONFIG.compactThresholdTokens,
+      hardCeilingTokens: DEFAULT_CONFIG.hardCeilingTokens,
+    });
+    expect(getEffectiveThresholds(DEFAULT_CONFIG, 1_000_000)).toEqual(
+      getEffectiveThresholds(DEFAULT_CONFIG),
+    );
   });
 
   it("parses checkpoint reset settings and rejects an invalid directory", () => {

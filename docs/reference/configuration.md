@@ -7,7 +7,7 @@ description: Configure local-context-manager thresholds, optional workflows, and
 
 [Documentation portal]({{ '/' | relative_url }}) · [How to use it]({{ '/guides/how-to-use.html' | relative_url }}) · [Command reference]({{ '/reference/commands.html' | relative_url }})
 
-No configuration is required. Start with the defaults, then change one setting at a time if your sessions or hardware need a different balance.
+No configuration is required. The invisible default is the `balanced` context mode. If a long local-model session becomes slow, try `/context-mode aggressive`; if compaction feels unnecessarily frequent, try `/context-mode relaxed`. Change numeric settings only for benchmarking or a specialized setup.
 
 ## Where configuration lives
 
@@ -36,6 +36,7 @@ Later project values override global values. You may either put settings at the 
 ```json
 {
   "localContextManager": {
+    "contextProfile": "balanced",
     "toolOutputReduction": true,
     "softWarningTokens": 24000,
     "compactThresholdTokens": 32000
@@ -50,10 +51,11 @@ After editing a file, start a new Pi session or run `/reload`.
 | Setting | Default | What it controls |
 | --- | ---: | --- |
 | `enabled` | `true` | Master switch for extension behavior. |
-| `softWarningTokens` | `24000` | Shows one warning when the active context reaches this level after a compaction cycle. |
-| `compactThresholdTokens` | `32000` | Threshold for a guarded proactive compaction request at an idle boundary. |
-| `hardCeilingTokens` | `48000` | Adds a `hard ceiling` status label at or above this level; Pi still owns emergency compaction. |
-| `keepRecentTokens` | `10000` | Preferred recent-context target used by the extension's compaction hook when Pi's native helpers allow it. |
+| `contextProfile` | `balanced` | Semantic threshold bundle: `aggressive`, `balanced`, or `relaxed`. Numeric settings below can override individual values. |
+| `softWarningTokens` | `24000` | Advanced override for the warning boundary after a compaction cycle. |
+| `compactThresholdTokens` | `32000` | Advanced override for a guarded proactive compaction request at an idle boundary. |
+| `hardCeilingTokens` | `48000` | Advanced override for the status boundary; Pi still owns emergency compaction. |
+| `keepRecentTokens` | `10000` | Advanced override for the recent-context target used by the extension's compaction hook when Pi's native helpers allow it. |
 | `toolOutputReduction` | `true` | Allows reduction of eligible newly arriving oversized tool results. |
 | `semanticCompaction` | `true` | Enables `request_context_compaction` and `/compact-phase`. |
 | `handoff` | `true` | Enables `/handoff <objective>`. |
@@ -69,23 +71,51 @@ keepRecentTokens < softWarningTokens < compactThresholdTokens < hardCeilingToken
 
 For example, the default `keepRecentTokens` is lower than the warning threshold, and the warning threshold is lower than the proactive compaction threshold. If you provide an invalid number or ordering, the extension keeps the prior valid value and shows a configuration warning.
 
-## A sensible custom configuration
+## Profiles and automatic adaptation
 
-Put this in `~/.pi/agent/local-context-manager.json` if your local model becomes uncomfortable with longer prompts:
+Profiles keep the four thresholds coherent:
+
+| Profile | Use it when | Nominal thresholds (keep / warn / compact / ceiling) |
+| --- | --- | ---: |
+| `aggressive` | Long sessions become noticeably slower | `8k / 16k / 24k / 36k` |
+| `balanced` | Normal starting point; this is the default | `10k / 24k / 32k / 48k` |
+| `relaxed` | Compaction happens too often and long prompts remain comfortable | `12k / 36k / 48k / 72k` |
+
+The extension also reads the model's reported context-window size. For a constrained window, it lowers thresholds to conservative fractions of that window (approximately 12.5% / 25% / 50% / 75%). It never scales them up because a model advertises a large window. If the window is unavailable, the configured profile and numeric values are used as-is. Numeric overrides remain advanced values, but they are also lowered when necessary to fit a constrained window.
+
+Use the guided command for the current session:
+
+```text
+/context-mode aggressive
+```
+
+This does not write a configuration file. To persist the choice, add the setting explicitly:
 
 ```json
 {
-  "enabled": true,
-  "softWarningTokens": 16000,
-  "compactThresholdTokens": 24000,
-  "hardCeilingTokens": 36000,
-  "keepRecentTokens": 8000,
-  "toolOutputReduction": true,
-  "semanticCompaction": true,
-  "handoff": true,
-  "checkpointReset": true,
-  "checkpointDirectory": null,
-  "debug": false
+  "contextProfile": "aggressive"
+}
+```
+
+## A sensible custom configuration
+
+Most users need only a profile:
+
+```json
+{
+  "contextProfile": "aggressive"
+}
+```
+
+For a specialized setup, numeric settings can override a profile bundle:
+
+```json
+{
+  "contextProfile": "balanced",
+  "softWarningTokens": 18000,
+  "compactThresholdTokens": 26000,
+  "hardCeilingTokens": 40000,
+  "keepRecentTokens": 8000
 }
 ```
 
@@ -101,16 +131,17 @@ If you only need to turn off one behavior, use a small project override instead:
 
 Turning off reduction leaves original tool results intact; it does not turn off Pi's native compaction. Turning off `semanticCompaction`, `handoff`, or `checkpointReset` disables only that extension workflow and reports the disabled state when its command is used.
 
-## Choosing thresholds
+## Choosing a mode
 
-The values are token counts, not percentages of every model's window. A threshold that feels comfortable depends on your model's context window, response quality, and local hardware.
+Start with `balanced` and let the extension work in the background. Choose by symptom rather than by hardware model:
 
-- Set `softWarningTokens` where you want a reminder to inspect the session.
-- Set `compactThresholdTokens` high enough to avoid unnecessary summaries, but low enough to leave room for the next turn.
-- Keep `hardCeilingTokens` as a status boundary rather than treating it as a setting that forces a reset.
-- Keep `keepRecentTokens` below the other thresholds. More recent tokens preserve continuity but leave less history to summarize.
+- **Sessions become slow as they grow:** use `aggressive`.
+- **Everything feels comfortable:** keep `balanced`.
+- **Compaction happens too often even though long prompts remain fast:** use `relaxed`.
 
-Start with defaults and use `/context-stats` before tuning. The extension uses a provider-reported value when available and a conservative active-context estimate otherwise.
+Run `/context-stats` to see the active mode and effective thresholds. The values are token counts, not percentages of every model's window. Hardware, runtime, model, quantization, and caching all affect performance, so this release does not assign thresholds from a machine lookup table.
+
+Use the four numeric fields only when measuring a specialized setup. Keep `keepRecentTokens` below the other thresholds, and treat `hardCeilingTokens` as a status boundary rather than a setting that forces a reset. The extension does not yet learn a performance knee or retune itself from latency measurements.
 
 ## Checkpoint storage
 
