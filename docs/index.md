@@ -61,13 +61,14 @@ The extension is designed for the middle ground: keep the active conversation sm
    ```
 5. Continue working normally. At a meaningful phase boundary, use `/compact-phase tests pass; implementation complete` or read [How to use it]({{ '/guides/how-to-use.html' | relative_url }}).
 
-No configuration is required. The default settings are intentionally conservative.
+No configuration is required. The default `balanced` mode is intentionally conservative. If a long session becomes slow, use `/context-mode aggressive`; if compaction feels too frequent, use `/context-mode relaxed`.
 
 ## Choose the right operation
 
 | Operation | Use it when | What happens |
 | --- | --- | --- |
 | Native `/compact` | The context is getting large and you want Pi's ordinary summary | Pi compacts the session while keeping recent context. |
+| `/context-mode [profile]` | A growing session feels slow or compaction feels too frequent | Chooses `aggressive`, `balanced`, or `relaxed` for the current session. |
 | `/compact-phase [reason]` | A meaningful phase is complete but you are continuing the same task | The extension asks for a phase-focused compaction at an idle boundary. |
 | `/handoff <objective>` | You want a fresh session focused on a substantially different objective | A continuation prompt is drafted, shown for editing, then a new session starts only after review. |
 | `/checkpoint-reset [reason]` | A major episode is complete and you want a small continuation capsule plus a durable local archive | You review the archive and capsule, explicitly approve, then a parent-linked fresh session starts. |

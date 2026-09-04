@@ -1,5 +1,6 @@
 {
   "enabled": true,
+  "contextProfile": "balanced",
   "softWarningTokens": 24000,
   "compactThresholdTokens": 32000,
   "hardCeilingTokens": 48000,

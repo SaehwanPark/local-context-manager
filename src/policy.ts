@@ -11,7 +11,7 @@ export interface CompactionGateOptions {
  * threshold gate when the caller has deliberately asked for a new epoch.
  */
 export class CompactionGate {
-  private readonly rearmTokens: number;
+  private rearmTokens: number;
   private readonly minimumTurnGap: number;
   private armed = true;
   private inFlight = false;
@@ -21,6 +21,10 @@ export class CompactionGate {
     this.rearmTokens = Number.isFinite(options.rearmTokens) ? Math.max(1, options.rearmTokens) : 1;
     const minimumTurnGap = options.minimumTurnGap ?? MIN_COMPACTION_TURN_GAP;
     this.minimumTurnGap = Number.isFinite(minimumTurnGap) ? Math.max(0, Math.floor(minimumTurnGap)) : MIN_COMPACTION_TURN_GAP;
+  }
+
+  setRearmTokens(rearmTokens: number): void {
+    this.rearmTokens = Number.isFinite(rearmTokens) ? Math.max(1, rearmTokens) : 1;
   }
 
   observe(tokens: number | null): void {

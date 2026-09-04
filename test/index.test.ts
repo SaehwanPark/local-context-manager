@@ -25,14 +25,14 @@ function makeExtensionHarness() {
   return { handlers, tools, commands };
 }
 
-function contextWithUsage(tokens: number | null) {
+function contextWithUsage(tokens: number | null, contextWindow = 64_000) {
   return {
     hasUI: false,
     mode: "json",
     cwd: process.cwd(),
     model: undefined,
     thinkingLevel: undefined,
-    getContextUsage: () => (tokens === null ? { tokens: null, contextWindow: 64_000, percent: null } : { tokens, contextWindow: 64_000, percent: 50 }),
+    getContextUsage: () => (tokens === null ? { tokens: null, contextWindow, percent: null } : { tokens, contextWindow, percent: 50 }),
     isIdle: () => true,
     compact: () => undefined,
     sessionManager: {
@@ -54,8 +54,49 @@ describe("extension integration", () => {
       expect.arrayContaining(["request_context_compaction", "request_context_reset"]),
     );
     expect([...harness.commands.keys()]).toEqual(
-      expect.arrayContaining(["context-stats", "compact-phase", "checkpoint-reset", "context-checkpoints", "handoff"]),
+      expect.arrayContaining([
+        "context-stats",
+        "context-mode",
+        "compact-phase",
+        "checkpoint-reset",
+        "context-checkpoints",
+        "handoff",
+      ]),
     );
+  });
+
+  it("switches context mode for the current session", async () => {
+    const harness = makeExtensionHarness();
+    let compactCalls = 0;
+    const context = contextWithUsage(25_000);
+    context.compact = () => {
+      compactCalls += 1;
+    };
+
+    const modeCommand = harness.commands.get("context-mode")?.handler;
+    expect(modeCommand).toBeDefined();
+    await modeCommand?.("aggressive", context);
+
+    const turnEnd = harness.handlers.get("turn_end")?.[0];
+    await turnEnd?.({}, context);
+    expect(compactCalls).toBe(1);
+  });
+
+  it("ignores an invalid context mode without changing policy", async () => {
+    const harness = makeExtensionHarness();
+    let compactCalls = 0;
+    const context = contextWithUsage(25_000);
+    context.compact = () => {
+      compactCalls += 1;
+    };
+
+    const modeCommand = harness.commands.get("context-mode")?.handler;
+    expect(modeCommand).toBeDefined();
+    await modeCommand?.("turbo", context);
+
+    const turnEnd = harness.handlers.get("turn_end")?.[0];
+    await turnEnd?.({}, context);
+    expect(compactCalls).toBe(0);
   });
 
   it("queues a reset recommendation without switching sessions", async () => {
@@ -86,6 +127,19 @@ describe("extension integration", () => {
     const turnEnd = harness.handlers.get("turn_end")?.[0];
     await turnEnd?.({}, context);
     expect(compactCalls).toBe(0);
+  });
+
+  it("lowers the proactive threshold for a constrained context window", async () => {
+    const harness = makeExtensionHarness();
+    let compactCalls = 0;
+    const context = contextWithUsage(17_000, 32_000);
+    context.compact = () => {
+      compactCalls += 1;
+    };
+
+    const turnEnd = harness.handlers.get("turn_end")?.[0];
+    await turnEnd?.({}, context);
+    expect(compactCalls).toBe(1);
   });
 
   it("requests one proactive compaction at a safe boundary", async () => {

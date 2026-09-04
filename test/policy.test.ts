@@ -28,6 +28,15 @@ describe("compaction policy", () => {
     expect(gate.canRequest(3, false)).toBe(true);
   });
 
+  it("updates hysteresis when the active context window changes", () => {
+    const gate = new CompactionGate({ rearmTokens: 24_000 });
+    gate.request(1);
+    gate.complete(30_000);
+    gate.setRearmTokens(8_000);
+    gate.observe(8_000);
+    expect(gate.canRequest(3, false)).toBe(true);
+  });
+
   it("keeps explicit phase requests under the same cooldown and in-flight guard", () => {
     const gate = new CompactionGate({ rearmTokens: 10_000, minimumTurnGap: MIN_COMPACTION_TURN_GAP });
     gate.request(4);

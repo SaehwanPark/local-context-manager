@@ -2,6 +2,26 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
+## [0.3.1] - 2026-09-04
+
+This release makes context tuning intent-based for normal users while keeping numeric controls available for advanced setups.
+
+### Added
+
+- `balanced`, `aggressive`, and `relaxed` context profiles, with `balanced` as the zero-configuration default.
+- `/context-mode [aggressive|balanced|relaxed]` for symptom-based, session-local tuning.
+- Automatic downward adaptation for constrained model context windows; large advertised windows never expand the configured policy.
+- Effective profile and threshold reporting through `/context-stats`.
+
+### Changed
+
+- Numeric threshold settings remain supported as advanced overrides and are applied after profile selection.
+- The compaction gate and custom compaction hook now use the active, context-window-aware thresholds.
+
+### Boundaries
+
+- This release does not infer thresholds from hardware, learn a performance knee from latency, or retune profiles autonomously.
+
 ## [0.3.0] - 2026-09-04
 
 This release completes the public, npm-distributed extension workflow.
@@ -48,6 +68,7 @@ Initial extension milestone delivered by [PR #1](https://github.com/SaehwanPark/
 - Reviewed `/handoff <objective>` continuation prompts and fresh-session initialization.
 - Package metadata, examples, tests, and build/typecheck configuration.
 
+[0.3.1]: https://github.com/SaehwanPark/local-context-manager/pull/5
 [0.3.0]: https://github.com/SaehwanPark/local-context-manager/releases/tag/v0.3.0
 [0.2.0]: https://github.com/SaehwanPark/local-context-manager/pull/2
 [0.1.0]: https://github.com/SaehwanPark/local-context-manager/pull/1

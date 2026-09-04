@@ -1,6 +1,6 @@
 {
   "name": "local-context-manager",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A Pi extension for cache-friendly context control in long-running local-LLM workflows",
   "type": "module",
   "keywords": ["pi-package", "pi-extension", "local-llm", "context-management"],
