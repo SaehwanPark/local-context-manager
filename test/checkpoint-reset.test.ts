@@ -341,6 +341,10 @@ describe("reset transaction", () => {
       );
       expect(files).toHaveLength(1);
       expect(context.newSession).toHaveBeenCalledTimes(1);
+      const newSession = context.newSession as unknown as ReturnType<typeof vi.fn>;
+      expect(newSession.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({ parentSession: "/tmp/parent-session.jsonl" }),
+      );
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
