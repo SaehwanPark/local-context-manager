@@ -1,11 +1,23 @@
 {
   "name": "local-context-manager",
-  "version": "0.1.0",
-  "description": "A small Pi extension for cache-friendly local-LLM context control",
+  "version": "0.3.0",
+  "description": "A Pi extension for cache-friendly context control in long-running local-LLM workflows",
   "type": "module",
   "keywords": ["pi-package", "pi-extension", "local-llm", "context-management"],
+  "author": "Sae-Hwan Park",
+  "homepage": "https://saehwanpark.github.io/local-context-manager/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SaehwanPark/local-context-manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SaehwanPark/local-context-manager/issues"
+  },
   "license": "MIT",
-  "files": ["src", "examples", "README.md"],
+  "files": ["src", "examples", "README.md", "CHANGELOG.md"],
+  "publishConfig": {
+    "access": "public"
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"
@@ -15,7 +27,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "prepublishOnly": "npm run check"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.84.4 <1"

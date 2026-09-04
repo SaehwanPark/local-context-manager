@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ page.title | default: site.title }} · {{ site.title }}</title>
+    <meta name="description" content="{{ page.description | default: site.description }}">
+    <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <button class="nav-toggle" type="button" aria-controls="site-navigation" aria-expanded="false">
+          <span aria-hidden="true">☰</span><span class="sr-only">Toggle navigation</span>
+        </button>
+        <a class="brand" href="{{ '/' | relative_url }}">
+          <span class="brand-mark" aria-hidden="true">LC</span>
+          <span><strong>Local Context Manager</strong><small>Pi extension · v{{ site.version }}</small></span>
+        </a>
+        <div class="header-links">
+          <a href="https://github.com/SaehwanPark/local-context-manager" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://www.npmjs.com/package/local-context-manager" target="_blank" rel="noopener">npm</a>
+        </div>
+      </div>
+    </header>
+
+    <div class="site-shell">
+      <aside id="site-navigation" class="sidebar" aria-label="Documentation navigation">
+        <nav>
+          <p class="nav-heading">Start here</p>
+          <a href="{{ '/' | relative_url }}">🏠 Documentation portal</a>
+          <a href="{{ '/guides/installation.html' | relative_url }}">🚀 Install & launch</a>
+          <a href="{{ '/guides/understanding-context.html' | relative_url }}">💡 Why context matters</a>
+
+          <p class="nav-heading">Use the extension</p>
+          <a href="{{ '/guides/how-to-use.html' | relative_url }}">🧭 How to use it</a>
+          <a href="{{ '/reference/configuration.html' | relative_url }}">⚙️ Configuration</a>
+          <a href="{{ '/reference/commands.html' | relative_url }}">⌨️ Command reference</a>
+
+          <p class="nav-heading">Project</p>
+          <a href="{{ '/reference/releases.html' | relative_url }}">📦 Releases</a>
+          <a href="https://github.com/SaehwanPark/local-context-manager" target="_blank" rel="noopener">Source & issues ↗</a>
+        </nav>
+      </aside>
+
+      <main id="main-content" class="main-content">
+        <article class="prose">
+          {{ content }}
+        </article>
+        <footer class="site-footer">
+          <span>MIT-licensed open source.</span>
+          <a href="https://github.com/SaehwanPark/local-context-manager" target="_blank" rel="noopener">View source on GitHub ↗</a>
+        </footer>
+      </main>
+    </div>
+
+    <script>
+      (function () {
+        var button = document.querySelector('.nav-toggle');
+        var navigation = document.querySelector('#site-navigation');
+        if (!button || !navigation) return;
+        button.addEventListener('click', function () {
+          var open = navigation.classList.toggle('is-open');
+          button.setAttribute('aria-expanded', String(open));
+        });
+
+        var currentPath = window.location.pathname.replace(/index\.html$/, '');
+        navigation.querySelectorAll('a').forEach(function (link) {
+          if (link.origin !== window.location.origin) return;
+          var linkPath = new URL(link.href).pathname.replace(/index\.html$/, '');
+          if (linkPath === currentPath) {
+            link.classList.add('active');
+            link.setAttribute('aria-current', 'page');
+          }
+        });
+      }());
+    </script>
+  </body>
+</html>
