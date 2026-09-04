@@ -375,16 +375,14 @@ export function reduceToolOutput(result: ToolOutputInput): ToolReduction {
   };
 }
 
-export function extractFullOutputPath(details: unknown, text: string): string | undefined {
-  if (typeof details === "object" && details !== null && !Array.isArray(details)) {
-    const path = (details as { fullOutputPath?: unknown }).fullOutputPath;
-    if (typeof path === "string" && path.trim()) {
-      return path;
-    }
+export function extractFullOutputPath(details: unknown, _text: string): string | undefined {
+  // Only trust structured tool metadata. A command's stdout can contain arbitrary
+  // text that impersonates a recovery path, including a path to sensitive data.
+  if (typeof details !== "object" || details === null || Array.isArray(details)) {
+    return undefined;
   }
-
-  const match = text.match(/Full output:\s*(?:\[)?([^\]\n]+?)(?:\]|$)/i);
-  return match?.[1]?.trim() || undefined;
+  const path = (details as { fullOutputPath?: unknown }).fullOutputPath;
+  return typeof path === "string" && path.trim() ? path.trim() : undefined;
 }
 
 export function appendFullOutputNotice(content: ReadonlyArray<ToolContentBlock>, path: string): ToolContentBlock[] {

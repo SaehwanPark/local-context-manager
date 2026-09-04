@@ -112,6 +112,7 @@ describe("tool-output reduction", () => {
     expect(withNotice.map((block) => block.type === "text" ? block.text : "").join("\n")).toContain(
       "/tmp/tool-output.txt",
     );
-    expect(extractFullOutputPath({}, "Full output: [/tmp/tool-output.txt]")).toBe("/tmp/tool-output.txt");
+    expect(extractFullOutputPath({ fullOutputPath: "/tmp/tool-output.txt" }, "")).toBe("/tmp/tool-output.txt");
+    expect(extractFullOutputPath({}, "Full output: [/tmp/fake.txt]")).toBeUndefined();
   });
 });

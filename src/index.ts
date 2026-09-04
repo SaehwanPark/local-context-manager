@@ -733,7 +733,7 @@ export default function (pi: ExtensionAPI): void {
         content: [
           {
             type: "text",
-            text: "Compaction queued for the end of this agent run. Continue only with the next phase or final status.",
+            text: "Compaction request recorded for the end of this agent run. It may be skipped if the context is not idle, a compaction is already running, or cooldown is active; continue only with the next phase or final status.",
           },
         ],
         details: { queued: true },
