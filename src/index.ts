@@ -57,7 +57,6 @@ type CompactionRequestReason = "threshold" | "semantic";
 
 interface PendingCompaction {
   reason: CompactionRequestReason;
-  context: ExtensionContext;
   generation: number;
 }
 
@@ -413,6 +412,17 @@ function getCompactionSlice(entries: SessionEntry[], keepRecentTokens: number): 
   };
 }
 
+function hasPersistedCompaction(context: ExtensionContext, compactionId: string): boolean {
+  try {
+    const branch = context.sessionManager.getBranch();
+    // Minimal hosts may not expose persisted entries; let Pi remain authoritative
+    // when there is no branch to inspect.
+    return branch.length === 0 || branch.some((entry) => entry.id === compactionId);
+  } catch {
+    return true;
+  }
+}
+
 function hasNativeCompactionCandidate(context: ExtensionContext): boolean {
   try {
     // Pi performs this preparation before it emits session_before_compact. If
@@ -575,12 +585,12 @@ export default function (pi: ExtensionAPI): void {
       return false;
     }
 
-    const pending: PendingCompaction = { reason, context, generation: sessionGeneration };
+    const pending: PendingCompaction = { reason, generation: sessionGeneration };
     requestedCompaction = pending;
     semanticRequested = false;
     semanticReason = undefined;
     const isCurrentRequest = (): boolean =>
-      requestedCompaction === pending && pending.generation === sessionGeneration && pending.context === context;
+      requestedCompaction === pending && pending.generation === sessionGeneration;
     const options = buildCompactionOptions(
       reason,
       instructions,
@@ -784,8 +794,12 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("session_compact", (event, context) => {
     const pending = requestedCompaction;
-    if (pending && (pending.generation !== sessionGeneration || pending.context !== context)) {
+    if (pending && pending.generation !== sessionGeneration) {
       debugLog(config, "ignoring stale compaction completion event");
+      return;
+    }
+    if (!pending && !hasPersistedCompaction(context, event.compactionEntry.id)) {
+      debugLog(config, `ignoring stale compaction completion event (${event.reason})`);
       return;
     }
     const usage = context.getContextUsage();
@@ -823,7 +837,6 @@ export default function (pi: ExtensionAPI): void {
     if (
       !failedRequest ||
       failedRequest.generation !== sessionGeneration ||
-      failedRequest.context !== context ||
       event.reason !== "manual"
     ) {
       debugLog(config, `ignoring unrelated compaction failure (${event.reason})`, event.errorMessage);

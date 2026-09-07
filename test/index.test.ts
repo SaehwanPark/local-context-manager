@@ -299,9 +299,15 @@ describe("extension integration", () => {
           tokensBefore: 32_000,
           timestamp: new Date().toISOString(),
         },
-        reason: "threshold",
+        reason: "manual",
       },
-      contextWithUsage(null),
+      contextWithUsage(1_000),
     );
+
+    const turnStart = harness.handlers.get("turn_start")?.[0];
+    await turnStart?.({}, context);
+    await turnStart?.({}, context);
+    await turnEnd?.({}, context);
+    expect(compactCalls).toBe(2);
   });
 });
