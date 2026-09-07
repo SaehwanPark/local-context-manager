@@ -286,6 +286,26 @@ describe("extension integration", () => {
     expect(compactCalls).toBe(2);
   });
 
+  it("contains stale-context errors from a current compaction failure callback", async () => {
+    const harness = makeExtensionHarness();
+    const context = contextWithUsage(32_000, 64_000, compactionHistory());
+    let stale = false;
+    Object.defineProperty(context, "hasUI", {
+      get: () => {
+        if (stale) throw new Error("stale context");
+        return false;
+      },
+    });
+    context.compact = (options?: CompactOptions): void => {
+      stale = true;
+      queueMicrotask(() => options?.onError?.(new Error("transient compaction failure")));
+    };
+
+    const turnEnd = harness.handlers.get("turn_end")?.[0];
+    await turnEnd?.({}, context);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
   it("ignores a late failure callback from a previous session", async () => {
     const harness = makeExtensionHarness();
     let compactCalls = 0;
@@ -313,6 +333,9 @@ describe("extension integration", () => {
     expect(secondOptions?.onComplete).toBeDefined();
 
     firstOptions?.onError?.(new Error("stale compaction failure"));
+    (firstOptions?.onComplete as ((result: { estimatedTokensAfter: number }) => void) | undefined)?.({
+      estimatedTokensAfter: 1_000,
+    });
     (secondOptions?.onComplete as ((result: { estimatedTokensAfter: number }) => void) | undefined)?.({
       estimatedTokensAfter: 1_000,
     });

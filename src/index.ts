@@ -283,14 +283,31 @@ function updateStatus(
   telemetry: ContextTelemetry,
   thresholds?: ContextThresholds,
 ): void {
-  if (!context.hasUI) {
-    return;
+  try {
+    if (!context.hasUI) {
+      return;
+    }
+    const activeThresholds = thresholds ?? resolveThresholds(context, config, telemetry);
+    context.ui.setStatus(
+      EXTENSION_STATUS_KEY,
+      config.enabled ? statusWithCeiling(telemetry, activeThresholds) : "off",
+    );
+  } catch (error) {
+    // Completion callbacks may outlive a replaced session. Status cleanup is
+    // best-effort and must not turn a native compaction failure into an
+    // unhandled rejection through Pi's compact() callback wrapper.
+    debugLog(config, "could not update extension status", error);
   }
-  const activeThresholds = thresholds ?? resolveThresholds(context, config, telemetry);
-  context.ui.setStatus(
-    EXTENSION_STATUS_KEY,
-    config.enabled ? statusWithCeiling(telemetry, activeThresholds) : "off",
-  );
+}
+
+function notifyUI(context: ExtensionContext, config: LocalContextManagerConfig, message: string, level: "info" | "warning" | "error"): void {
+  try {
+    if (context.hasUI) {
+      context.ui.notify(message, level);
+    }
+  } catch (error) {
+    debugLog(config, "could not notify through stale extension context", error);
+  }
 }
 
 function observeContext(
@@ -631,9 +648,7 @@ export default function (pi: ExtensionAPI): void {
         restoreSemanticRequest(pending);
         requestedCompaction = undefined;
         debugLog(config, "compaction request failed", error);
-        if (context.hasUI) {
-          context.ui.notify(`Context compaction failed: ${error.message}`, "warning");
-        }
+        notifyUI(context, config, `Context compaction failed: ${error.message}`, "warning");
         updateStatus(context, config, telemetry);
       },
     );
@@ -649,9 +664,7 @@ export default function (pi: ExtensionAPI): void {
       }
       const message = error instanceof Error ? error.message : String(error);
       debugLog(config, "could not start compaction", error);
-      if (context.hasUI) {
-        context.ui.notify(`Context compaction could not start: ${message}`, "warning");
-      }
+      notifyUI(context, config, `Context compaction could not start: ${message}`, "warning");
       return false;
     }
   };
@@ -862,13 +875,13 @@ export default function (pi: ExtensionAPI): void {
     }
     restoreSemanticRequest(failedRequest);
     requestedCompaction = undefined;
-    if (context.hasUI) {
-      const retryMessage = failedRequest.reason === "semantic" ? " The phase-boundary request was retained for a later turn." : "";
-      context.ui.notify(
-        `local-context-manager compaction did not complete: ${event.errorMessage ?? "cancelled"}.${retryMessage}`,
-        "warning",
-      );
-    }
+    const retryMessage = failedRequest.reason === "semantic" ? " The phase-boundary request was retained for a later turn." : "";
+    notifyUI(
+      context,
+      config,
+      `local-context-manager compaction did not complete: ${event.errorMessage ?? "cancelled"}.${retryMessage}`,
+      "warning",
+    );
     debugLog(config, `compaction failed (${event.reason})`, event.errorMessage);
     updateStatus(context, config, telemetry);
   });
