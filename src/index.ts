@@ -669,6 +669,28 @@ export default function (pi: ExtensionAPI): void {
     }
   };
 
+  const scheduleSettledCompaction = (
+    context: ExtensionContext,
+    reason: CompactionRequestReason,
+    instructions?: string,
+  ): void => {
+    const generation = sessionGeneration;
+    setImmediate(() => {
+      if (generation !== sessionGeneration) {
+        debugLog(config, "skipping settled compaction from a replaced session");
+        return;
+      }
+      try {
+        requestCompaction(context, reason, instructions);
+      } catch (error) {
+        // A host may tear down the session between agent_settled and this
+        // deferred boundary. Compaction is best-effort and must not escape the
+        // timer as an unhandled rejection.
+        debugLog(config, "could not schedule settled compaction", error);
+      }
+    });
+  };
+
   pi.on("session_start", async (event, context) => {
     const generation = sessionGeneration + 1;
     sessionGeneration = generation;
@@ -806,7 +828,7 @@ export default function (pi: ExtensionAPI): void {
     }
 
     if (semanticRequested && config.enabled && config.semanticCompaction) {
-      requestCompaction(
+      scheduleSettledCompaction(
         context,
         "semantic",
         semanticReason
@@ -816,7 +838,7 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     if (config.enabled && shouldTriggerThresholdCompaction(observed.tokens, observed.thresholds.compactThresholdTokens)) {
-      requestCompaction(context, "threshold");
+      scheduleSettledCompaction(context, "threshold");
     }
   });
 

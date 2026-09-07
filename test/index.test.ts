@@ -25,6 +25,10 @@ function makeExtensionHarness() {
   return { handlers, tools, commands };
 }
 
+function flushImmediate(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 function contextWithUsage(tokens: number | null, contextWindow = 64_000, entries: SessionEntry[] = []) {
   return {
     hasUI: false,
@@ -251,6 +255,7 @@ describe("extension integration", () => {
     });
     const settled = harness.handlers.get("agent_settled")?.[0];
     await settled?.({}, context);
+    await flushImmediate();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(compactCalls).toBe(1);
 
@@ -258,6 +263,7 @@ describe("extension integration", () => {
     await turnStart?.({}, context);
     await turnStart?.({}, context);
     await settled?.({}, context);
+    await flushImmediate();
     expect(compactCalls).toBe(2);
   });
 
@@ -275,6 +281,7 @@ describe("extension integration", () => {
     });
     const settled = harness.handlers.get("agent_settled")?.[0];
     await settled?.({}, context);
+    await flushImmediate();
     expect(compactCalls).toBe(1);
 
     const failed = harness.handlers.get("session_compact_failed")?.[0];
@@ -283,6 +290,7 @@ describe("extension integration", () => {
     await turnStart?.({}, context);
     await turnStart?.({}, context);
     await settled?.({}, context);
+    await flushImmediate();
     expect(compactCalls).toBe(2);
   });
 
@@ -304,6 +312,26 @@ describe("extension integration", () => {
     const turnEnd = harness.handlers.get("turn_end")?.[0];
     await turnEnd?.({}, context);
     await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  it("isolates a settled compaction when the session is replaced", async () => {
+    const harness = makeExtensionHarness();
+    let firstOptions: CompactOptions | undefined;
+    const firstContext = contextWithUsage(32_000, 64_000, compactionHistory());
+    firstContext.compact = (options?: CompactOptions): void => {
+      firstOptions = options;
+    };
+
+    const settled = harness.handlers.get("agent_settled")?.[0];
+    await settled?.({}, firstContext);
+    await flushImmediate();
+    expect(firstOptions?.onError).toBeDefined();
+
+    const shutdown = harness.handlers.get("session_shutdown")?.[0];
+    await shutdown?.({}, firstContext);
+    await harness.handlers.get("session_start")?.[0]?.({ reason: "reload" }, contextWithUsage(1_000));
+
+    expect(() => firstOptions?.onError?.(new Error("stale settled failure"))).not.toThrow();
   });
 
   it("ignores a late failure callback from a previous session", async () => {
