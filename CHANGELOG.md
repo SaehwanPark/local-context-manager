@@ -2,6 +2,14 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
+## [0.3.4] - 2026-09-07
+
+This patch prevents asynchronous tool-result processing from crossing session boundaries.
+
+### Fixed
+
+- Ignore a reduced tool result after the session generation changes while its recovery copy is being written, preventing stale telemetry/UI access after shutdown or reload.
+
 ## [0.3.3] - 2026-09-07
 
 This patch completes lifecycle isolation for Pi's per-event extension contexts.
@@ -87,6 +95,7 @@ Initial extension milestone delivered by [PR #1](https://github.com/SaehwanPark/
 - Reviewed `/handoff <objective>` continuation prompts and fresh-session initialization.
 - Package metadata, examples, tests, and build/typecheck configuration.
 
+[0.3.4]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/SaehwanPark/local-context-manager/pull/5

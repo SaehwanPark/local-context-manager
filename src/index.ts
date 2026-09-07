@@ -857,6 +857,7 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("tool_result", async (event, context) => {
+    const generation = sessionGeneration;
     if (!config.enabled) {
       return;
     }
@@ -884,6 +885,10 @@ export default function (pi: ExtensionAPI): void {
     let fullOutputPath = extractFullOutputPath(event.details, reduction.originalText);
     if (!fullOutputPath) {
       fullOutputPath = await saveRecoveryCopy(reduction.originalText);
+      if (generation !== sessionGeneration) {
+        debugLog(config, "ignoring stale tool result after session change");
+        return;
+      }
     }
     if (!fullOutputPath) {
       // Do not discard recoverability when the host did not provide a full-output
