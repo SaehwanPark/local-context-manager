@@ -2,6 +2,15 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
+## [0.3.8] - 2026-09-07
+
+This patch rejects duplicate and retired compaction completion events.
+
+### Fixed
+
+- Track bounded compaction-entry identities across session generations so late completion events cannot complete a newer request or mutate current telemetry.
+- Add regression coverage for a completion event arriving after session replacement.
+
 ## [0.3.7] - 2026-09-07
 
 This patch defers settled compaction across the host lifecycle boundary.
@@ -121,6 +130,7 @@ Initial extension milestone delivered by [PR #1](https://github.com/SaehwanPark/
 - Reviewed `/handoff <objective>` continuation prompts and fresh-session initialization.
 - Package metadata, examples, tests, and build/typecheck configuration.
 
+[0.3.8]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.4...v0.3.5

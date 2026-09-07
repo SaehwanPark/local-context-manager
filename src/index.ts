@@ -570,6 +570,8 @@ export default function (pi: ExtensionAPI): void {
   let sessionGeneration = 0;
   let semanticRequested = false;
   let semanticReason: string | undefined;
+  let seenCompactionIds = new Set<string>();
+  const retiredCompactionIds = new Set<string>();
   let checkpointResetRequested = false;
   let checkpointResetReason: string | undefined;
   let requestedCompaction: PendingCompaction | undefined;
@@ -582,6 +584,22 @@ export default function (pi: ExtensionAPI): void {
   const setCheckpointResetRequest = (reason: string | undefined): void => {
     checkpointResetRequested = true;
     checkpointResetReason = cleanBoundaryReason(reason);
+  };
+
+  const rememberCompactionId = (id: string, target: Set<string>): void => {
+    target.add(id);
+    while (target.size > 2_048) {
+      const oldest = target.values().next().value as string | undefined;
+      if (oldest === undefined) break;
+      target.delete(oldest);
+    }
+  };
+
+  const retireSeenCompactions = (): void => {
+    for (const id of seenCompactionIds) {
+      rememberCompactionId(id, retiredCompactionIds);
+    }
+    seenCompactionIds = new Set<string>();
   };
 
   const restoreSemanticRequest = (pending: PendingCompaction): void => {
@@ -694,6 +712,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_start", async (event, context) => {
     const generation = sessionGeneration + 1;
     sessionGeneration = generation;
+    retireSeenCompactions();
     requestedCompaction = undefined;
     semanticRequested = false;
     semanticReason = undefined;
@@ -716,6 +735,9 @@ export default function (pi: ExtensionAPI): void {
     config = loaded.config;
 
     const branch = context.sessionManager.getBranch();
+    seenCompactionIds = new Set(
+      branch.flatMap((entry) => (entry.type === "compaction" && entry.id ? [entry.id] : [])),
+    );
     const existing = countCompactions(branch);
     const checkpointReset = getLatestCheckpointResetRecord(branch);
     telemetry = new ContextTelemetry(
@@ -779,6 +801,7 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", (_event, context) => {
     sessionGeneration += 1;
+    retireSeenCompactions();
     requestedCompaction = undefined;
     semanticRequested = false;
     semanticReason = undefined;
@@ -843,15 +866,21 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_compact", (event, context) => {
+    const compactionId = event.compactionEntry.id;
     const pending = requestedCompaction;
+    if (seenCompactionIds.has(compactionId) || retiredCompactionIds.has(compactionId)) {
+      debugLog(config, `ignoring duplicate or stale compaction completion event (${event.reason})`);
+      return;
+    }
     if (pending && pending.generation !== sessionGeneration) {
       debugLog(config, "ignoring stale compaction completion event");
       return;
     }
-    if (!pending && !hasPersistedCompaction(context, event.compactionEntry.id)) {
+    if (!pending && !hasPersistedCompaction(context, compactionId)) {
       debugLog(config, `ignoring stale compaction completion event (${event.reason})`);
       return;
     }
+    rememberCompactionId(compactionId, seenCompactionIds);
     const usage = context.getContextUsage();
     telemetry.observe(usage);
     let activeEntries: SessionEntry[] = [];
