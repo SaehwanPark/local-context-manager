@@ -2,6 +2,15 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
+## [0.3.6] - 2026-09-07
+
+This patch makes stale compaction callback cleanup fully best-effort across session replacement.
+
+### Fixed
+
+- Contain stale-context errors from compaction completion/failure callbacks so Pi's asynchronous compact wrapper cannot surface an unhandled rejection.
+- Keep status cleanup and warning notifications safe when a session context has already been invalidated.
+
 ## [0.3.5] - 2026-09-07
 
 This patch preserves explicit phase-boundary compaction requests across transient native failures.
@@ -103,6 +112,7 @@ Initial extension milestone delivered by [PR #1](https://github.com/SaehwanPark/
 - Reviewed `/handoff <objective>` continuation prompts and fresh-session initialization.
 - Package metadata, examples, tests, and build/typecheck configuration.
 
+[0.3.6]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.2...v0.3.3

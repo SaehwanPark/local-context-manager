@@ -7,7 +7,7 @@ description: Release history and installation links for local-context-manager.
 
 [Documentation portal]({{ '/' | relative_url }}) · [Installation & first launch]({{ '/guides/installation.html' | relative_url }}) · [GitHub changelog](https://github.com/SaehwanPark/local-context-manager/blob/main/CHANGELOG.md)
 
-The current source release is **`{{ site.version }}`**. GitHub and the Pages site document v0.3.5; the npm registry currently serves v0.3.1 until the repository's one-time trusted-publisher configuration is completed and the release workflow is rerun.
+The current source release is **`{{ site.version }}`**. GitHub and the Pages site document v0.3.6; the npm registry currently serves v0.3.1 until the repository's one-time trusted-publisher configuration is completed and the release workflow is rerun.
 
 ## Install the current release
 
@@ -29,7 +29,8 @@ pi install npm:local-context-manager@0.3.1
 
 | Version | Milestone | Highlights |
 | --- | --- | --- |
-| **0.3.5** | Semantic retry preservation (GitHub source release) | Explicit phase-boundary requests survive transient native failures with bounded retry backoff; npm publication is pending trusted-publisher setup. |
+| **0.3.6** | Stale callback containment (GitHub source release) | Invalidated compaction callbacks cannot surface unhandled UI/status errors; npm publication is pending trusted-publisher setup. |
+| **0.3.5** | Semantic retry preservation | Explicit phase-boundary requests survive transient native failures with bounded retry backoff. |
 | **0.3.4** | Stale tool-result isolation | Session-generation guard for asynchronous recovery-copy writes. |
 | **0.3.3** | Compaction event isolation | Per-event context-safe completion handling and stale-event suppression. |
 | **0.3.2** | Nonfatal compaction recovery | Native cut-point preflight, async failure recovery/backoff, and lifecycle-safe callbacks. |
