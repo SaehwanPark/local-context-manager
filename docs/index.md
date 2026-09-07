@@ -50,10 +50,11 @@ The extension is designed for the middle ground: keep the active conversation sm
 ## Quickstart: first use
 
 1. Install Pi and authenticate with a provider using the [official Pi quickstart](https://github.com/earendil-works/pi#quick-start).
-2. Install this package from a terminal:
+2. Install this package directly from GitHub:
    ```bash
-   pi install npm:local-context-manager
+   pi install git:github.com/SaehwanPark/local-context-manager
    ```
+   *(To pin a specific release version, append `#<tag>`, e.g., `pi install git:github.com/SaehwanPark/local-context-manager#v0.3.3`)*
 3. Start Pi in a project (`pi`) or reload an already-running session with `/reload`.
 4. Run:
    ```text

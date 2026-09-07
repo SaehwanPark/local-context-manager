@@ -8,8 +8,16 @@ The **[beginner documentation portal](https://saehwanpark.github.io/local-contex
 
 ## Install in Pi
 
+Install the extension directly from GitHub by default:
+
 ```bash
-pi install npm:local-context-manager
+pi install git:github.com/SaehwanPark/local-context-manager
+```
+
+To pin a specific release version (e.g., `v0.3.3`):
+
+```bash
+pi install git:github.com/SaehwanPark/local-context-manager#v0.3.3
 ```
 
 Start (or reload) Pi in your project, then try:
@@ -18,7 +26,7 @@ Start (or reload) Pi in your project, then try:
 /context-stats
 ```
 
-The extension works with Pi's existing models and configuration. It does not install a model or change Pi's emergency compaction authority. The v0.3.8 source release is available on GitHub; the npm pin is updated to `npm:local-context-manager@0.3.1` until the repository's trusted npm publisher completes the v0.3.8 publication.
+The extension works with Pi's existing models and configuration. It does not install a model or change Pi's emergency compaction authority. While npm deployment setup is in progress, installing directly from GitHub (`pi install git:...`) is the recommended default.
 
 ## What it adds
 

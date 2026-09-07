@@ -27,21 +27,23 @@ Start Pi once and authenticate with `/login`, or configure the provider you alre
 
 > **Local-model note:** “Local-LLM workflow” describes the main use case, not a requirement. This extension can run in any Pi session. If data must stay local, select and configure a local provider before using model-generated features.
 
-## 2. Install the extension from npm
+## 2. Install the extension from GitHub
 
 Run this in a terminal, from any directory:
 
 ```bash
-pi install npm:local-context-manager
+pi install git:github.com/SaehwanPark/local-context-manager
 ```
 
 Pi installs the package and its runtime dependency, then records it in your user package settings. The package declares its Pi compatibility as `>=0.84.4 <1`.
 
-To pin exactly this release instead of following the latest version:
+To pin a specific release version (such as `v0.3.3`) instead of following the latest default branch:
 
 ```bash
-pi install npm:local-context-manager@0.3.0
+pi install git:github.com/SaehwanPark/local-context-manager#v0.3.3
 ```
+
+> **npm note:** Due to ongoing deployment setup issues on npm, installing directly from GitHub via `git:...` is recommended by default.
 
 > **Security note:** Pi packages run with the permissions of Pi and can execute code. Read the [source](https://github.com/SaehwanPark/local-context-manager) before installing, just as you would for any third-party Pi extension.
 
@@ -87,19 +89,19 @@ The extension needs no configuration to begin. Its defaults are enabled and cons
 Update the unpinned package from a terminal:
 
 ```bash
-pi update npm:local-context-manager
+pi update git:github.com/SaehwanPark/local-context-manager
 ```
 
 If you installed a pinned version, move it explicitly to a newer version:
 
 ```bash
-pi install npm:local-context-manager@0.3.0
+pi install git:github.com/SaehwanPark/local-context-manager#v0.3.3
 ```
 
 Remove it with:
 
 ```bash
-pi remove npm:local-context-manager
+pi remove git:github.com/SaehwanPark/local-context-manager
 ```
 
 Restart Pi (or use `/reload`) after changing installed packages.
@@ -112,13 +114,13 @@ Close and reopen the terminal after installing Pi. If the command is still missi
 
 ### `pi install` says the package cannot be found
 
-Check the spelling and registry connectivity:
+Check the repository source URL and internet connectivity:
 
 ```bash
-npm view local-context-manager version
+pi install git:github.com/SaehwanPark/local-context-manager
 ```
 
-If you are offline, npm cannot download a new package. You can test a local checkout instead:
+If you are offline or working without GitHub access, you can test a local checkout instead:
 
 ```bash
 pi install /absolute/path/to/local-context-manager
@@ -140,7 +142,7 @@ Pi may not have provider usage yet, or it may be immediately after compaction. T
 From a terminal, start a temporary session with:
 
 ```bash
-pi --extension npm:local-context-manager
+pi --extension git:github.com/SaehwanPark/local-context-manager
 ```
 
 This lets you review the package in a session without adding it to your regular package settings.

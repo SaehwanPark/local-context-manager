@@ -7,23 +7,25 @@ description: Release history and installation links for local-context-manager.
 
 [Documentation portal]({{ '/' | relative_url }}) · [Installation & first launch]({{ '/guides/installation.html' | relative_url }}) · [GitHub changelog](https://github.com/SaehwanPark/local-context-manager/blob/main/CHANGELOG.md)
 
-The current source release is **`{{ site.version }}`**. GitHub and the Pages site document v0.3.8; the npm registry currently serves v0.3.1 until the repository's one-time trusted-publisher configuration is completed and the release workflow is rerun.
+The current source release is **`{{ site.version }}`**. GitHub and the Pages site document v0.3.8. While npm package deployment is pending trusted-publishing configuration, installing directly from GitHub via `git:...` is recommended by default.
 
 ## Install the current release
 
-```bash
-pi install npm:local-context-manager
-```
-
-To pin the latest published npm package:
+Install directly from GitHub:
 
 ```bash
-pi install npm:local-context-manager@0.3.1
+pi install git:github.com/SaehwanPark/local-context-manager
 ```
 
-- [npm package](https://www.npmjs.com/package/local-context-manager)
+To pin a specific release version (for example `v0.3.3`):
+
+```bash
+pi install git:github.com/SaehwanPark/local-context-manager#v0.3.3
+```
+
 - [GitHub repository](https://github.com/SaehwanPark/local-context-manager)
 - [Beginner installation guide]({{ '/guides/installation.html' | relative_url }})
+- [npm package](https://www.npmjs.com/package/local-context-manager) *(npm serves v0.3.1 until trusted publishing is active)*
 
 ## Version history
 
@@ -58,4 +60,4 @@ npm pack --dry-run
 
 Published GitHub releases now run `.github/workflows/release.yml`, which verifies that the tag matches `package.json` and publishes through npm trusted publishing. The npm package's one-time trusted-publisher setting must point to this repository and workflow; no long-lived npm token is stored in GitHub. The GitHub Pages workflow deploys documentation from `main`.
 
-When upgrading, restart Pi or use `/reload`. If you need to preserve a reproducible setup, use the pinned `npm:local-context-manager@<version>` form and keep the version in your project notes.
+When upgrading, restart Pi or use `/reload`. If you need to preserve a reproducible setup, use the pinned `git:github.com/SaehwanPark/local-context-manager#<version>` form and keep the version in your project notes.
