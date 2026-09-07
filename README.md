@@ -18,7 +18,7 @@ Start (or reload) Pi in your project, then try:
 /context-stats
 ```
 
-The extension works with Pi's existing models and configuration. It does not install a model or change Pi's emergency compaction authority. The latest published release can be pinned with `npm:local-context-manager@0.3.0`.
+The extension works with Pi's existing models and configuration. It does not install a model or change Pi's emergency compaction authority. The latest published release can be pinned with `npm:local-context-manager@0.3.2`.
 
 ## What it adds
 

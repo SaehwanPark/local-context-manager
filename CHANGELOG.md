@@ -2,6 +2,16 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
+## [0.3.2] - 2026-09-07
+
+This patch keeps compaction and coordination failures best-effort so recoverable sessions can continue.
+
+### Fixed
+
+- Preflight Pi's native compaction cut point before proactive or semantic requests, skipping no-op requests when the session has no summarizable history.
+- Reuse Pi-compatible cut-point preparation for the extension's custom compaction path.
+- Preserve continued turns when an asynchronous compaction request fails; Pi remains responsible for emergency/overflow recovery.
+
 ## [0.3.1] - 2026-09-04
 
 This release makes context tuning intent-based for normal users while keeping numeric controls available for advanced setups.
@@ -68,6 +78,7 @@ Initial extension milestone delivered by [PR #1](https://github.com/SaehwanPark/
 - Reviewed `/handoff <objective>` continuation prompts and fresh-session initialization.
 - Package metadata, examples, tests, and build/typecheck configuration.
 
+[0.3.2]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/SaehwanPark/local-context-manager/pull/5
 [0.3.0]: https://github.com/SaehwanPark/local-context-manager/releases/tag/v0.3.0
 [0.2.0]: https://github.com/SaehwanPark/local-context-manager/pull/2

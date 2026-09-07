@@ -3,15 +3,18 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type {
-  CompactOptions,
-  CompactionResult,
-  ExtensionAPI,
-  FileOperations,
-  ExtensionCommandContext,
-  ExtensionContext,
-  SessionEntry,
-  SessionBeforeCompactEvent,
+import {
+  DEFAULT_COMPACTION_SETTINGS,
+  findCutPoint,
+  sessionEntryToContextMessages,
+  type CompactOptions,
+  type CompactionResult,
+  type ExtensionAPI,
+  type FileOperations,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+  type SessionEntry,
+  type SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import { runHandoff } from "./handoff.js";
 import {
@@ -51,6 +54,12 @@ const SEMANTIC_PARAMETERS = Type.Object({
 });
 
 type CompactionRequestReason = "threshold" | "semantic";
+
+interface PendingCompaction {
+  reason: CompactionRequestReason;
+  context: ExtensionContext;
+  generation: number;
+}
 
 interface ObservedContext {
   tokens: number | null;
@@ -348,6 +357,81 @@ function formatThresholdSummary(thresholds: ContextThresholds): string {
   ].join(" · ");
 }
 
+interface CompactionSlice {
+  firstKeptEntryId: string;
+  messagesToSummarize: AgentMessage[];
+  turnPrefixMessages: AgentMessage[];
+  isSplitTurn: boolean;
+}
+
+function getCompactionSlice(entries: SessionEntry[], keepRecentTokens: number): CompactionSlice | undefined {
+  if (entries.length === 0 || entries.at(-1)?.type === "compaction") {
+    return undefined;
+  }
+
+  let previousCompactionIndex = -1;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (entries[index].type === "compaction") {
+      previousCompactionIndex = index;
+      break;
+    }
+  }
+  let boundaryStart = 0;
+  if (previousCompactionIndex >= 0) {
+    const previousCompaction = entries[previousCompactionIndex];
+    if (previousCompaction.type === "compaction") {
+      const keptIndex = entries.findIndex((entry) => entry.id === previousCompaction.firstKeptEntryId);
+      boundaryStart = keptIndex >= 0 ? keptIndex : previousCompactionIndex + 1;
+    }
+  }
+
+  const cutPoint = findCutPoint(entries, boundaryStart, entries.length, keepRecentTokens);
+  const firstKeptEntry = entries[cutPoint.firstKeptEntryIndex];
+  if (!firstKeptEntry?.id) {
+    return undefined;
+  }
+  const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
+  if (historyEnd < boundaryStart) {
+    return undefined;
+  }
+  const messagesToSummarize = entries
+    .slice(boundaryStart, historyEnd)
+    .flatMap((entry) => (entry.type === "compaction" ? [] : sessionEntryToContextMessages(entry)));
+  const turnPrefixMessages = cutPoint.isSplitTurn
+    ? entries
+        .slice(cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex)
+        .flatMap((entry) => (entry.type === "compaction" ? [] : sessionEntryToContextMessages(entry)))
+    : [];
+  if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0) {
+    return undefined;
+  }
+  return {
+    firstKeptEntryId: firstKeptEntry.id,
+    messagesToSummarize,
+    turnPrefixMessages,
+    isSplitTurn: cutPoint.isSplitTurn,
+  };
+}
+
+function hasNativeCompactionCandidate(context: ExtensionContext): boolean {
+  try {
+    // Pi performs this preparation before it emits session_before_compact. If
+    // there are no messages before the native cut point, context.compact() can
+    // only fail with "Nothing to compact". Use Pi's exported defaults for the
+    // preflight because ExtensionContext does not expose active compaction
+    // settings; the extension's smaller keepRecentTokens policy is applied only
+    // after this native preflight succeeds.
+    return getCompactionSlice(
+      context.sessionManager.getBranch(),
+      DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
+    ) !== undefined;
+  } catch {
+    // A host without a readable session branch should retain Pi's normal behavior
+    // rather than making the extension's best-effort guard authoritative.
+    return true;
+  }
+}
+
 function buildCompactionOptions(
   reason: CompactionRequestReason,
   instructions: string | undefined,
@@ -380,64 +464,16 @@ async function buildCustomCompaction(
 
   try {
     const pi = await import("@earendil-works/pi-coding-agent");
-    if (
-      typeof pi.findCutPoint !== "function" ||
-      typeof pi.sessionEntryToContextMessages !== "function" ||
-      typeof pi.compact !== "function"
-    ) {
+    if (typeof pi.compact !== "function") {
       debugLog(config, "native compaction helpers are unavailable; using Pi's default compaction");
       return undefined;
     }
 
-    if (event.branchEntries.at(-1)?.type === "compaction") {
+    const slice = getCompactionSlice(event.branchEntries, thresholds.keepRecentTokens);
+    if (!slice) {
       return undefined;
     }
-
-    let previousCompactionIndex = -1;
-    for (let index = event.branchEntries.length - 1; index >= 0; index--) {
-      if (event.branchEntries[index].type === "compaction") {
-        previousCompactionIndex = index;
-        break;
-      }
-    }
-    let boundaryStart = 0;
-    if (previousCompactionIndex >= 0) {
-      const previousCompaction = event.branchEntries[previousCompactionIndex];
-      if (previousCompaction.type === "compaction") {
-        const keptIndex = event.branchEntries.findIndex(
-          (entry) => entry.id === previousCompaction.firstKeptEntryId,
-        );
-        boundaryStart = keptIndex >= 0 ? keptIndex : previousCompactionIndex + 1;
-      }
-    }
-
-    const cutPoint = pi.findCutPoint(
-      event.branchEntries,
-      boundaryStart,
-      event.branchEntries.length,
-      thresholds.keepRecentTokens,
-    );
-    const firstKeptEntry = event.branchEntries[cutPoint.firstKeptEntryIndex];
-    if (!firstKeptEntry?.id) {
-      return undefined;
-    }
-
-    const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
-    if (historyEnd < boundaryStart) {
-      return undefined;
-    }
-    const messagesToSummarize = event.branchEntries
-      .slice(boundaryStart, historyEnd)
-      .flatMap((entry) => (entry.type === "compaction" ? [] : pi.sessionEntryToContextMessages(entry)));
-    const turnPrefixMessages = cutPoint.isSplitTurn
-      ? event.branchEntries
-          .slice(cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex)
-          .flatMap((entry) => (entry.type === "compaction" ? [] : pi.sessionEntryToContextMessages(entry)))
-      : [];
-    if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0) {
-      return undefined;
-    }
-
+    const { firstKeptEntryId, messagesToSummarize, turnPrefixMessages, isSplitTurn } = slice;
     const fileOps: FileOperations = {
       read: new Set(event.preparation.fileOps.read),
       written: new Set(event.preparation.fileOps.written),
@@ -448,10 +484,10 @@ async function buildCustomCompaction(
 
     const preparation = {
       ...event.preparation,
-      firstKeptEntryId: firstKeptEntry.id,
+      firstKeptEntryId,
       messagesToSummarize,
       turnPrefixMessages,
-      isSplitTurn: cutPoint.isSplitTurn,
+      isSplitTurn,
       fileOps,
       settings: {
         ...event.preparation.settings,
@@ -503,11 +539,12 @@ export default function (pi: ExtensionAPI): void {
   });
   const warned = { value: false };
   let turnSerial = 0;
+  let sessionGeneration = 0;
   let semanticRequested = false;
   let semanticReason: string | undefined;
   let checkpointResetRequested = false;
   let checkpointResetReason: string | undefined;
-  let requestedCompaction: CompactionRequestReason | undefined;
+  let requestedCompaction: PendingCompaction | undefined;
 
   const setSemanticRequest = (reason: string | undefined): void => {
     semanticRequested = true;
@@ -530,19 +567,30 @@ export default function (pi: ExtensionAPI): void {
     if (!config.enabled || !context.isIdle()) {
       return false;
     }
+    if (!hasNativeCompactionCandidate(context)) {
+      debugLog(config, "skipping compaction: session has no summarizable history");
+      return false;
+    }
     if (!gate.canRequest(turnSerial, reason === "semantic") || !gate.request(turnSerial)) {
       return false;
     }
 
-    requestedCompaction = reason;
+    const pending: PendingCompaction = { reason, context, generation: sessionGeneration };
+    requestedCompaction = pending;
     semanticRequested = false;
     semanticReason = undefined;
+    const isCurrentRequest = (): boolean =>
+      requestedCompaction === pending && pending.generation === sessionGeneration && pending.context === context;
     const options = buildCompactionOptions(
       reason,
       instructions,
       (result) => {
         // The session_compact event is the authoritative completion signal. This
         // callback is only a compatibility fallback for minimal test hosts.
+        if (!isCurrentRequest()) {
+          debugLog(config, "ignoring stale compaction completion callback");
+          return;
+        }
         if (gate.isInFlight) {
           gate.complete(result.estimatedTokensAfter ?? null, turnSerial);
           requestedCompaction = undefined;
@@ -550,13 +598,16 @@ export default function (pi: ExtensionAPI): void {
         }
       },
       (error) => {
-        if (gate.isInFlight) {
-          gate.fail();
+        if (!isCurrentRequest()) {
+          debugLog(config, "ignoring stale compaction failure callback", error);
+          return;
         }
-        const failedRequest = requestedCompaction;
+        if (gate.isInFlight) {
+          gate.fail(turnSerial);
+        }
         requestedCompaction = undefined;
         debugLog(config, "compaction request failed", error);
-        if (failedRequest && context.hasUI) {
+        if (context.hasUI) {
           context.ui.notify(`Context compaction failed: ${error.message}`, "warning");
         }
         updateStatus(context, config, telemetry);
@@ -567,8 +618,10 @@ export default function (pi: ExtensionAPI): void {
       context.compact(options);
       return true;
     } catch (error) {
-      gate.fail();
-      requestedCompaction = undefined;
+      if (requestedCompaction === pending) {
+        gate.fail(turnSerial);
+        requestedCompaction = undefined;
+      }
       const message = error instanceof Error ? error.message : String(error);
       debugLog(config, "could not start compaction", error);
       if (context.hasUI) {
@@ -579,13 +632,27 @@ export default function (pi: ExtensionAPI): void {
   };
 
   pi.on("session_start", async (event, context) => {
+    const generation = sessionGeneration + 1;
+    sessionGeneration = generation;
+    requestedCompaction = undefined;
+    semanticRequested = false;
+    semanticReason = undefined;
+    checkpointResetRequested = false;
+    checkpointResetReason = undefined;
+
     const paths = await getPiPathSettings();
+    if (generation !== sessionGeneration) {
+      return;
+    }
     pathSettings = paths;
     const loaded = await loadConfig({
       globalConfigPath: join(paths.agentDir, "local-context-manager.json"),
       projectConfigPath: join(context.cwd, paths.configDirName, "local-context-manager.json"),
       allowProjectConfig: context.isProjectTrusted(),
     });
+    if (generation !== sessionGeneration) {
+      return;
+    }
     config = loaded.config;
 
     const branch = context.sessionManager.getBranch();
@@ -626,6 +693,9 @@ export default function (pi: ExtensionAPI): void {
       // newSession() runs its setup callback after session_start, so recover the
       // reset marker once the new session's append-only state is available.
       setImmediate(() => {
+        if (generation !== sessionGeneration) {
+          return;
+        }
         try {
           const latestReset = getLatestCheckpointResetRecord(context.sessionManager.getBranch());
           if (latestReset) {
@@ -648,6 +718,10 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", (_event, context) => {
+    sessionGeneration += 1;
+    requestedCompaction = undefined;
+    semanticRequested = false;
+    semanticReason = undefined;
     if (context.hasUI) {
       context.ui.setStatus(EXTENSION_STATUS_KEY, undefined);
     }
@@ -709,6 +783,11 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_compact", (event, context) => {
+    const pending = requestedCompaction;
+    if (pending && (pending.generation !== sessionGeneration || pending.context !== context)) {
+      debugLog(config, "ignoring stale compaction completion event");
+      return;
+    }
     const usage = context.getContextUsage();
     telemetry.observe(usage);
     let activeEntries: SessionEntry[] = [];
@@ -741,11 +820,20 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("session_compact_failed", (event, context) => {
     const failedRequest = requestedCompaction;
+    if (
+      !failedRequest ||
+      failedRequest.generation !== sessionGeneration ||
+      failedRequest.context !== context ||
+      event.reason !== "manual"
+    ) {
+      debugLog(config, `ignoring unrelated compaction failure (${event.reason})`, event.errorMessage);
+      return;
+    }
     if (gate.isInFlight) {
-      gate.fail();
+      gate.fail(turnSerial);
     }
     requestedCompaction = undefined;
-    if (failedRequest && context.hasUI) {
+    if (context.hasUI) {
       context.ui.notify(
         `local-context-manager compaction did not complete: ${event.errorMessage ?? "cancelled"}`,
         "warning",

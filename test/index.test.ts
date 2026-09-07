@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { CompactOptions, ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 import extension from "../src/index.js";
 
 type Handler = (event: unknown, context: unknown) => unknown;
@@ -25,21 +25,56 @@ function makeExtensionHarness() {
   return { handlers, tools, commands };
 }
 
-function contextWithUsage(tokens: number | null, contextWindow = 64_000) {
+function contextWithUsage(tokens: number | null, contextWindow = 64_000, entries: SessionEntry[] = []) {
   return {
     hasUI: false,
     mode: "json",
     cwd: process.cwd(),
     model: undefined,
+    isProjectTrusted: () => true,
     thinkingLevel: undefined,
     getContextUsage: () => (tokens === null ? { tokens: null, contextWindow, percent: null } : { tokens, contextWindow, percent: 50 }),
     isIdle: () => true,
-    compact: () => undefined,
+    compact: (_options?: CompactOptions): void => {},
     sessionManager: {
-      buildContextEntries: () => [],
-      getBranch: () => [],
+      buildContextEntries: () => entries,
+      getBranch: () => entries,
     },
   };
+}
+
+function compactionHistory(contentChars = 32_000): SessionEntry[] {
+  const content = [{ type: "text", text: "x".repeat(contentChars) }];
+  return [
+    {
+      type: "message",
+      id: "user-1",
+      parentId: null,
+      timestamp: new Date(1).toISOString(),
+      message: { role: "user", content, timestamp: 1 },
+    },
+    {
+      type: "message",
+      id: "assistant-1",
+      parentId: "user-1",
+      timestamp: new Date(2).toISOString(),
+      message: { role: "assistant", content, timestamp: 2 },
+    },
+    {
+      type: "message",
+      id: "user-2",
+      parentId: "assistant-1",
+      timestamp: new Date(3).toISOString(),
+      message: { role: "user", content, timestamp: 3 },
+    },
+    {
+      type: "message",
+      id: "assistant-2",
+      parentId: "user-2",
+      timestamp: new Date(4).toISOString(),
+      message: { role: "assistant", content, timestamp: 4 },
+    },
+  ] as SessionEntry[];
 }
 
 describe("extension integration", () => {
@@ -68,7 +103,7 @@ describe("extension integration", () => {
   it("switches context mode for the current session", async () => {
     const harness = makeExtensionHarness();
     let compactCalls = 0;
-    const context = contextWithUsage(25_000);
+    const context = contextWithUsage(25_000, 64_000, compactionHistory());
     context.compact = () => {
       compactCalls += 1;
     };
@@ -132,7 +167,7 @@ describe("extension integration", () => {
   it("lowers the proactive threshold for a constrained context window", async () => {
     const harness = makeExtensionHarness();
     let compactCalls = 0;
-    const context = contextWithUsage(17_000, 32_000);
+    const context = contextWithUsage(17_000, 32_000, compactionHistory());
     context.compact = () => {
       compactCalls += 1;
     };
@@ -142,10 +177,105 @@ describe("extension integration", () => {
     expect(compactCalls).toBe(1);
   });
 
-  it("requests one proactive compaction at a safe boundary", async () => {
+  it("does not start compaction when Pi has no summarizable history", async () => {
     const harness = makeExtensionHarness();
     let compactCalls = 0;
     const context = contextWithUsage(32_000);
+    context.compact = () => {
+      compactCalls += 1;
+    };
+
+    const turnEnd = harness.handlers.get("turn_end")?.[0];
+    await turnEnd?.({}, context);
+    expect(compactCalls).toBe(0);
+  });
+
+  it("does not trigger below Pi's native compaction floor", async () => {
+    const harness = makeExtensionHarness();
+    let compactCalls = 0;
+    const context = contextWithUsage(17_000, 32_000, compactionHistory(16_000));
+    context.compact = () => {
+      compactCalls += 1;
+    };
+
+    const turnEnd = harness.handlers.get("turn_end")?.[0];
+    await turnEnd?.({}, context);
+    expect(compactCalls).toBe(0);
+  });
+
+  it("does not let an unrelated native failure disable proactive requests", async () => {
+    const harness = makeExtensionHarness();
+    let compactCalls = 0;
+    const context = contextWithUsage(32_000, 64_000, compactionHistory());
+    context.compact = () => {
+      compactCalls += 1;
+    };
+
+    const failed = harness.handlers.get("session_compact_failed")?.[0];
+    await failed?.({ reason: "threshold", errorMessage: "native failure" }, context);
+    const turnEnd = harness.handlers.get("turn_end")?.[0];
+    await turnEnd?.({}, context);
+    expect(compactCalls).toBe(1);
+  });
+
+  it("keeps later turns alive when asynchronous compaction fails", async () => {
+    const harness = makeExtensionHarness();
+    let compactCalls = 0;
+    const context = contextWithUsage(32_000, 64_000, compactionHistory());
+    context.compact = (options?: CompactOptions): void => {
+      compactCalls += 1;
+      queueMicrotask(() => options?.onError?.(new Error("transient compaction failure")));
+    };
+
+    const turnEnd = harness.handlers.get("turn_end")?.[0];
+    await turnEnd?.({}, context);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(compactCalls).toBe(1);
+
+    await turnEnd?.({}, context);
+    expect(compactCalls).toBe(1);
+  });
+
+  it("ignores a late failure callback from a previous session", async () => {
+    const harness = makeExtensionHarness();
+    let compactCalls = 0;
+    let firstOptions: CompactOptions | undefined;
+    let secondOptions: CompactOptions | undefined;
+    const firstContext = contextWithUsage(32_000, 64_000, compactionHistory());
+    firstContext.compact = (options?: CompactOptions): void => {
+      compactCalls += 1;
+      firstOptions = options;
+    };
+    const sessionStart = harness.handlers.get("session_start")?.[0];
+    const turnEnd = harness.handlers.get("turn_end")?.[0];
+    const turnStart = harness.handlers.get("turn_start")?.[0];
+    await turnEnd?.({}, firstContext);
+
+    const secondContext = contextWithUsage(32_000, 64_000, compactionHistory());
+    secondContext.compact = (options?: CompactOptions): void => {
+      compactCalls += 1;
+      secondOptions = options;
+    };
+    await sessionStart?.({ reason: "reload" }, secondContext);
+    await turnEnd?.({}, secondContext);
+    expect(compactCalls).toBe(2);
+    expect(firstOptions?.onError).toBeDefined();
+    expect(secondOptions?.onComplete).toBeDefined();
+
+    firstOptions?.onError?.(new Error("stale compaction failure"));
+    (secondOptions?.onComplete as ((result: { estimatedTokensAfter: number }) => void) | undefined)?.({
+      estimatedTokensAfter: 1_000,
+    });
+    await turnStart?.({}, secondContext);
+    await turnStart?.({}, secondContext);
+    await turnEnd?.({}, secondContext);
+    expect(compactCalls).toBe(3);
+  });
+
+  it("requests one proactive compaction at a safe boundary", async () => {
+    const harness = makeExtensionHarness();
+    let compactCalls = 0;
+    const context = contextWithUsage(32_000, 64_000, compactionHistory());
     context.compact = () => {
       compactCalls += 1;
     };
