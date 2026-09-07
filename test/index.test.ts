@@ -334,6 +334,74 @@ describe("extension integration", () => {
     expect(() => firstOptions?.onError?.(new Error("stale settled failure"))).not.toThrow();
   });
 
+  it("ignores a late completion event from a previous session", async () => {
+    const harness = makeExtensionHarness();
+    let compactCalls = 0;
+    let secondOptions: CompactOptions | undefined;
+    const firstContext = contextWithUsage(32_000, 64_000, compactionHistory());
+    firstContext.compact = () => {
+      compactCalls += 1;
+    };
+    const turnEnd = harness.handlers.get("turn_end")?.[0];
+    await turnEnd?.({}, firstContext);
+    const compacted = harness.handlers.get("session_compact")?.[0];
+    await compacted?.(
+      {
+        compactionEntry: {
+          type: "compaction",
+          id: "old-session-compaction",
+          parentId: null,
+          summary: "old checkpoint",
+          firstKeptEntryId: "kept-1",
+          tokensBefore: 32_000,
+          timestamp: new Date().toISOString(),
+        },
+        reason: "manual",
+      },
+      contextWithUsage(1_000),
+    );
+
+    await harness.handlers.get("session_shutdown")?.[0]?.({}, firstContext);
+    const secondContext = contextWithUsage(10_000, 64_000, compactionHistory());
+    secondContext.compact = (options?: CompactOptions): void => {
+      compactCalls += 1;
+      secondOptions = options;
+    };
+    await harness.handlers.get("session_start")?.[0]?.({ reason: "reload" }, secondContext);
+    const requestTool = harness.tools.find((candidate) => candidate.name === "request_context_compaction");
+    await (requestTool?.execute as (id: string, params: { reason?: string }) => Promise<unknown>)("phase-1", {
+      reason: "new phase",
+    });
+    const settled = harness.handlers.get("agent_settled")?.[0];
+    await settled?.({}, secondContext);
+    await flushImmediate();
+    expect(compactCalls).toBe(2);
+
+    await compacted?.(
+      {
+        compactionEntry: {
+          type: "compaction",
+          id: "old-session-compaction",
+          parentId: null,
+          summary: "old checkpoint",
+          firstKeptEntryId: "kept-1",
+          tokensBefore: 32_000,
+          timestamp: new Date().toISOString(),
+        },
+        reason: "manual",
+      },
+      secondContext,
+    );
+    secondOptions?.onError?.(new Error("new compaction failure"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const turnStart = harness.handlers.get("turn_start")?.[0];
+    await turnStart?.({}, secondContext);
+    await turnStart?.({}, secondContext);
+    await settled?.({}, secondContext);
+    await flushImmediate();
+    expect(compactCalls).toBe(3);
+  });
+
   it("ignores a late failure callback from a previous session", async () => {
     const harness = makeExtensionHarness();
     let compactCalls = 0;

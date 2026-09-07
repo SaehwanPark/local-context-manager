@@ -7,7 +7,7 @@ description: Release history and installation links for local-context-manager.
 
 [Documentation portal]({{ '/' | relative_url }}) · [Installation & first launch]({{ '/guides/installation.html' | relative_url }}) · [GitHub changelog](https://github.com/SaehwanPark/local-context-manager/blob/main/CHANGELOG.md)
 
-The current source release is **`{{ site.version }}`**. GitHub and the Pages site document v0.3.7; the npm registry currently serves v0.3.1 until the repository's one-time trusted-publisher configuration is completed and the release workflow is rerun.
+The current source release is **`{{ site.version }}`**. GitHub and the Pages site document v0.3.8; the npm registry currently serves v0.3.1 until the repository's one-time trusted-publisher configuration is completed and the release workflow is rerun.
 
 ## Install the current release
 
@@ -29,7 +29,8 @@ pi install npm:local-context-manager@0.3.1
 
 | Version | Milestone | Highlights |
 | --- | --- | --- |
-| **0.3.7** | Settled compaction lifecycle isolation (GitHub source release) | Deferred settled compaction skips replaced sessions; npm publication is pending trusted-publisher setup. |
+| **0.3.8** | Compaction event identity isolation (GitHub source release) | Retired/duplicate completion events cannot mutate a newer request; npm publication is pending trusted-publisher setup. |
+| **0.3.7** | Settled compaction lifecycle isolation | Deferred settled compaction skips replaced sessions. |
 | **0.3.6** | Stale callback containment | Invalidated compaction callbacks cannot surface unhandled UI/status errors. |
 | **0.3.5** | Semantic retry preservation | Explicit phase-boundary requests survive transient native failures with bounded retry backoff. |
 | **0.3.4** | Stale tool-result isolation | Session-generation guard for asynchronous recovery-copy writes. |
