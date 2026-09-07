@@ -87,7 +87,7 @@ The model can call this after a meaningful task phase. It accepts an optional sh
 }
 ```
 
-The tool queues a request for the end of the current agent run. It does not compact in the middle of a tool call. Pi may skip the request if the session is not idle, another compaction is running, or cooldown is active.
+The tool queues a request for the end of the current agent run. It does not compact in the middle of a tool call. Pi may skip the request if the session is not idle, another compaction is running, cooldown is active, or the native history is too small to summarize. These are best-effort decisions; a failed request releases the gate with a retry backoff and the active session remains available.
 
 ### `request_context_reset`
 

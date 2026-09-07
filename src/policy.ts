@@ -7,6 +7,8 @@ export interface CompactionGateOptions {
 
 /**
  * Keeps threshold compaction one-shot until the active epoch has actually shrunk.
+ * Failed requests reopen the gate with a bounded exponential turn backoff so a
+ * transient failure can recover without creating a same-turn retry loop.
  * Explicit phase-boundary requests still honor the turn cooldown but can bypass the
  * threshold gate when the caller has deliberately asked for a new epoch.
  */
@@ -16,6 +18,8 @@ export class CompactionGate {
   private armed = true;
   private inFlight = false;
   private lastRequestTurn: number | null = null;
+  private failureCount = 0;
+  private retryNotBeforeTurn: number | null = null;
 
   constructor(options: CompactionGateOptions) {
     this.rearmTokens = Number.isFinite(options.rearmTokens) ? Math.max(1, options.rearmTokens) : 1;
@@ -30,6 +34,8 @@ export class CompactionGate {
   observe(tokens: number | null): void {
     if (tokens !== null && Number.isFinite(tokens) && tokens <= this.rearmTokens) {
       this.armed = true;
+      this.failureCount = 0;
+      this.retryNotBeforeTurn = null;
     }
   }
 
@@ -42,6 +48,9 @@ export class CompactionGate {
       Number.isFinite(turn) &&
       turn - this.lastRequestTurn < this.minimumTurnGap
     ) {
+      return false;
+    }
+    if (this.retryNotBeforeTurn !== null && Number.isFinite(turn) && turn < this.retryNotBeforeTurn) {
       return false;
     }
     return explicit || this.armed;
@@ -59,15 +68,25 @@ export class CompactionGate {
 
   complete(postTokens: number | null, turn?: number): void {
     this.inFlight = false;
+    this.failureCount = 0;
+    this.retryNotBeforeTurn = null;
     this.observe(postTokens);
     if (turn !== undefined && Number.isFinite(turn) && turn >= 0) {
       this.lastRequestTurn = turn;
     }
   }
 
-  fail(): void {
+  fail(turn?: number): void {
     this.inFlight = false;
-    this.armed = false;
+    // A failed request must not permanently suppress threshold compaction while
+    // the context remains above its trigger. Retry after an exponential turn
+    // backoff instead of creating a same-turn failure loop.
+    this.armed = true;
+    this.failureCount = Math.min(this.failureCount + 1, 4);
+    if (turn !== undefined && Number.isFinite(turn) && turn >= 0) {
+      const backoff = this.minimumTurnGap * 2 ** (this.failureCount - 1);
+      this.retryNotBeforeTurn = turn + Math.max(this.minimumTurnGap, backoff);
+    }
   }
 
   get isInFlight(): boolean {

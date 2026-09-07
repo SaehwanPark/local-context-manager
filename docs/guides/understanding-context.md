@@ -60,7 +60,7 @@ This is what **cache-friendly** means here: the extension avoids continually rew
 
 ### 3. Safer compaction timing
 
-Pi remains the authority for emergency/overflow compaction. The extension can request proactive compaction when the context crosses your configured threshold, but it waits for Pi to be idle and uses guards against concurrent requests and rapid loops.
+Pi remains the authority for emergency/overflow compaction. The extension can request proactive compaction when the context crosses your configured threshold, but it waits for Pi to be idle, checks that Pi has summarizable history before requesting, and uses guards against concurrent requests, stale callbacks, and rapid retry loops. A recoverable compaction failure does not delete the session or permanently disable later attempts.
 
 You can also request an intentional phase compaction with:
 

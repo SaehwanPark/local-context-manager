@@ -28,6 +28,19 @@ describe("compaction policy", () => {
     expect(gate.canRequest(3, false)).toBe(true);
   });
 
+  it("rearms after a failed request with a turn backoff", () => {
+    const gate = new CompactionGate({ rearmTokens: 24_000 });
+    gate.request(1);
+    gate.fail(1);
+    expect(gate.canRequest(2, false)).toBe(false);
+    expect(gate.canRequest(3, false)).toBe(true);
+
+    gate.request(3);
+    gate.fail(3);
+    expect(gate.canRequest(6, false)).toBe(false);
+    expect(gate.canRequest(7, false)).toBe(true);
+  });
+
   it("updates hysteresis when the active context window changes", () => {
     const gate = new CompactionGate({ rearmTokens: 24_000 });
     gate.request(1);

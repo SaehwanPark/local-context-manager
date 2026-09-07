@@ -45,7 +45,7 @@ Do not compact after every small edit. A phase might be “implementation comple
 /compact-phase implementation and tests complete
 ```
 
-This waits for Pi to be idle, then asks Pi to compact with the phase reason. If a compaction is already running, cooldown is active, or there is not enough history, the command reports that nothing started. Your session is not deleted.
+This waits for Pi to be idle, then asks Pi to compact with the phase reason. The extension first checks Pi's native cut point; if a compaction is already running, cooldown is active, or there is not enough summarizable history, the command reports that nothing started. Your session is not deleted. A transient compaction failure releases the request gate with a retry backoff so later turns can continue.
 
 Pi's normal command remains available:
 

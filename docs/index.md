@@ -88,7 +88,7 @@ No configuration is required. The default `balanced` mode is intentionally conse
 
 ## Safety and boundaries
 
-- Pi remains responsible for emergency/overflow compaction.
+- Pi remains responsible for emergency/overflow compaction; the extension preflights native history and treats recoverable compaction failures as best-effort.
 - The extension does not automatically reset a session, detect GitHub PRs, or load old checkpoints into a new prompt.
 - A checkpoint reset requires idle time, generated-artifact review, explicit approval, and a successful local write before the session changes.
 - Checkpoints can contain private paths and implementation notes. They are stored as local agent state, outside the repository by default, and should not be committed or uploaded.
