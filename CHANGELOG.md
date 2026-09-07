@@ -2,6 +2,15 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
+## [0.3.3] - 2026-09-07
+
+This patch completes lifecycle isolation for Pi's per-event extension contexts.
+
+### Fixed
+
+- Correlate compaction completion with the active generation and persisted compaction entry instead of comparing per-event `ExtensionContext` object identity.
+- Ignore stale native completion events from an older session so telemetry and the compaction gate cannot be reset by late callbacks.
+
 ## [0.3.2] - 2026-09-07
 
 This patch keeps compaction and coordination failures best-effort so recoverable sessions can continue.
@@ -78,6 +87,7 @@ Initial extension milestone delivered by [PR #1](https://github.com/SaehwanPark/
 - Reviewed `/handoff <objective>` continuation prompts and fresh-session initialization.
 - Package metadata, examples, tests, and build/typecheck configuration.
 
+[0.3.3]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/SaehwanPark/local-context-manager/pull/5
 [0.3.0]: https://github.com/SaehwanPark/local-context-manager/releases/tag/v0.3.0
