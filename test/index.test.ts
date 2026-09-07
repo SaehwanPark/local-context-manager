@@ -236,6 +236,56 @@ describe("extension integration", () => {
     expect(compactCalls).toBe(1);
   });
 
+  it("retains a semantic request after an asynchronous compaction failure", async () => {
+    const harness = makeExtensionHarness();
+    let compactCalls = 0;
+    const context = contextWithUsage(32_000, 64_000, compactionHistory());
+    context.compact = (options?: CompactOptions): void => {
+      compactCalls += 1;
+      queueMicrotask(() => options?.onError?.(new Error("transient compaction failure")));
+    };
+
+    const requestTool = harness.tools.find((candidate) => candidate.name === "request_context_compaction");
+    await (requestTool?.execute as (id: string, params: { reason?: string }) => Promise<unknown>)("phase-1", {
+      reason: "phase one complete",
+    });
+    const settled = harness.handlers.get("agent_settled")?.[0];
+    await settled?.({}, context);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(compactCalls).toBe(1);
+
+    const turnStart = harness.handlers.get("turn_start")?.[0];
+    await turnStart?.({}, context);
+    await turnStart?.({}, context);
+    await settled?.({}, context);
+    expect(compactCalls).toBe(2);
+  });
+
+  it("retains a semantic request after a native failure event", async () => {
+    const harness = makeExtensionHarness();
+    let compactCalls = 0;
+    const context = contextWithUsage(32_000, 64_000, compactionHistory());
+    context.compact = (): void => {
+      compactCalls += 1;
+    };
+
+    const requestTool = harness.tools.find((candidate) => candidate.name === "request_context_compaction");
+    await (requestTool?.execute as (id: string, params: { reason?: string }) => Promise<unknown>)("phase-1", {
+      reason: "phase one complete",
+    });
+    const settled = harness.handlers.get("agent_settled")?.[0];
+    await settled?.({}, context);
+    expect(compactCalls).toBe(1);
+
+    const failed = harness.handlers.get("session_compact_failed")?.[0];
+    await failed?.({ reason: "manual", errorMessage: "native failure" }, context);
+    const turnStart = harness.handlers.get("turn_start")?.[0];
+    await turnStart?.({}, context);
+    await turnStart?.({}, context);
+    await settled?.({}, context);
+    expect(compactCalls).toBe(2);
+  });
+
   it("ignores a late failure callback from a previous session", async () => {
     const harness = makeExtensionHarness();
     let compactCalls = 0;

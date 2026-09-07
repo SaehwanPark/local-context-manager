@@ -2,6 +2,14 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
+## [0.3.5] - 2026-09-07
+
+This patch preserves explicit phase-boundary compaction requests across transient native failures.
+
+### Fixed
+
+- Requeue semantic compaction intent after asynchronous, event-based, or synchronous native failures, using the existing bounded retry backoff instead of silently consuming the request.
+
 ## [0.3.4] - 2026-09-07
 
 This patch prevents asynchronous tool-result processing from crossing session boundaries.
@@ -95,6 +103,7 @@ Initial extension milestone delivered by [PR #1](https://github.com/SaehwanPark/
 - Reviewed `/handoff <objective>` continuation prompts and fresh-session initialization.
 - Package metadata, examples, tests, and build/typecheck configuration.
 
+[0.3.5]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.1...v0.3.2

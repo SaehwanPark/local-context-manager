@@ -58,6 +58,7 @@ type CompactionRequestReason = "threshold" | "semantic";
 interface PendingCompaction {
   reason: CompactionRequestReason;
   generation: number;
+  semanticReason?: string;
 }
 
 interface ObservedContext {
@@ -566,6 +567,14 @@ export default function (pi: ExtensionAPI): void {
     checkpointResetReason = cleanBoundaryReason(reason);
   };
 
+  const restoreSemanticRequest = (pending: PendingCompaction): void => {
+    if (pending.reason !== "semantic" || pending.generation !== sessionGeneration) {
+      return;
+    }
+    semanticRequested = true;
+    semanticReason = pending.semanticReason;
+  };
+
   const runPiCommand = (command: string, args: string[], cwd: string) =>
     pi.exec(command, args, { cwd, timeout: 3_000 });
 
@@ -585,7 +594,11 @@ export default function (pi: ExtensionAPI): void {
       return false;
     }
 
-    const pending: PendingCompaction = { reason, generation: sessionGeneration };
+    const pending: PendingCompaction = {
+      reason,
+      generation: sessionGeneration,
+      ...(reason === "semantic" && semanticReason !== undefined ? { semanticReason } : {}),
+    };
     requestedCompaction = pending;
     semanticRequested = false;
     semanticReason = undefined;
@@ -615,6 +628,7 @@ export default function (pi: ExtensionAPI): void {
         if (gate.isInFlight) {
           gate.fail(turnSerial);
         }
+        restoreSemanticRequest(pending);
         requestedCompaction = undefined;
         debugLog(config, "compaction request failed", error);
         if (context.hasUI) {
@@ -630,6 +644,7 @@ export default function (pi: ExtensionAPI): void {
     } catch (error) {
       if (requestedCompaction === pending) {
         gate.fail(turnSerial);
+        restoreSemanticRequest(pending);
         requestedCompaction = undefined;
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -845,10 +860,12 @@ export default function (pi: ExtensionAPI): void {
     if (gate.isInFlight) {
       gate.fail(turnSerial);
     }
+    restoreSemanticRequest(failedRequest);
     requestedCompaction = undefined;
     if (context.hasUI) {
+      const retryMessage = failedRequest.reason === "semantic" ? " The phase-boundary request was retained for a later turn." : "";
       context.ui.notify(
-        `local-context-manager compaction did not complete: ${event.errorMessage ?? "cancelled"}`,
+        `local-context-manager compaction did not complete: ${event.errorMessage ?? "cancelled"}.${retryMessage}`,
         "warning",
       );
     }
