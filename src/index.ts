@@ -798,8 +798,8 @@ export default function (pi: ExtensionAPI): void {
       debugLog(config, "ignoring stale compaction completion event");
       return;
     }
-    if (!pending && event.reason === "manual" && !hasPersistedCompaction(context, event.compactionEntry.id)) {
-      debugLog(config, "ignoring stale manual compaction completion event");
+    if (!pending && !hasPersistedCompaction(context, event.compactionEntry.id)) {
+      debugLog(config, `ignoring stale compaction completion event (${event.reason})`);
       return;
     }
     const usage = context.getContextUsage();
