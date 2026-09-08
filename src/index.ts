@@ -691,37 +691,25 @@ export default function (pi: ExtensionAPI): void {
       ...(currentSessionId ? { sessionId: currentSessionId } : {}),
     });
 
-    const fabricSnapshot =
-      observation.kind === "known"
-        ? observation.snapshot
-        : observation.kind === "uncertain"
-          ? observation.snapshot
-          : undefined;
-    const isFabricUncertain = observation.kind === "uncertain";
-
-    // P1.1: agent_settled fabric query is extension-order/race sensitive.
-    // Check if fabric has active child work vs transient root projection lag.
-    const hasActiveChildWork = Boolean(
-      fabricSnapshot &&
-        (fabricSnapshot.runningChildren > 0 ||
-          fabricSnapshot.unresolvedChildTasks > 0 ||
-          fabricSnapshot.mutableHolds > 0 ||
-          fabricSnapshot.activeWriteFences > 0 ||
-          fabricSnapshot.pendingRootDeliveries > 0),
-    );
-
-    // If only reason is root_agent_active_or_running, but Pi itself emitted agent_settled,
-    // this is transient projection lag in the safe-agent broker.
+    // The safe-agent provider owns the quiescence definition. Reproducing only
+    // part of that definition here would silently become unsafe when the
+    // provider adds another non-quiescence reason (for example, a pending root
+    // request). The one deliberate exception is the known root-only projection
+    // lag that can remain briefly after Pi emits agent_settled.
     const isRootOnlyLag = Boolean(
-      fabricSnapshot &&
-        !hasActiveChildWork &&
-        fabricSnapshot.quiescenceReasons?.length === 1 &&
-        fabricSnapshot.quiescenceReasons[0] === "root_agent_active_or_running",
+      observation.kind === "known" &&
+        observation.snapshot.active &&
+        !observation.snapshot.quiescent &&
+        observation.snapshot.quiescenceReasons?.length === 1 &&
+        observation.snapshot.quiescenceReasons[0] === "root_agent_active_or_running",
     );
 
-    // For non-destructive semantic operations (semantic compaction & recommendation),
-    // defer only if there are active children or true uncertainty (not transient root lag).
-    const deferFabricWork = (hasActiveChildWork || isFabricUncertain) && !isRootOnlyLag;
+    const deferFabricWork =
+      observation.kind === "uncertain" ||
+      (observation.kind === "known" &&
+        observation.snapshot.active &&
+        !observation.snapshot.quiescent &&
+        !isRootOnlyLag);
 
     if (checkpointResetRequested) {
       const reason = checkpointResetReason;

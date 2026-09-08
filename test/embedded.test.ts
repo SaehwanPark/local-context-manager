@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createEmbeddedContextManager,
@@ -286,5 +287,32 @@ describe("EmbeddedContextManager", () => {
     // Disposing managerA cleans up its files without impacting managerB
     managerA.dispose();
     managerB.dispose();
+  });
+
+  it("retains recovery files across deactivation until final disposal", async () => {
+    const manager = createEmbeddedContextManager(createMockHost(), { contextWindow: 128_000 });
+    const transformed = await manager.transformToolResult({
+      toolName: "bash",
+      input: { command: "npm test" },
+      content: [{ type: "text", text: "failure details\n".repeat(2_000) }],
+      isError: true,
+    });
+    const text = (transformed.content[0] as { type: "text"; text: string }).text;
+    const recoveryPath = text.match(/Full output saved to: (.*)/)?.[1];
+    expect(recoveryPath).toBeDefined();
+
+    manager.deactivate?.();
+    await expect(stat(recoveryPath!)).resolves.toBeDefined();
+    expect((await manager.transformToolResult({
+      toolName: "bash",
+      input: { command: "npm test" },
+      content: [{ type: "text", text: "failure details\n".repeat(2_000) }],
+      isError: true,
+    })).content).toEqual([{ type: "text", text: "failure details\n".repeat(2_000) }]);
+
+    manager.dispose();
+    await vi.waitFor(async () => {
+      await expect(stat(recoveryPath!)).rejects.toMatchObject({ code: "ENOENT" });
+    });
   });
 });

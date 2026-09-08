@@ -102,5 +102,16 @@ export interface EmbeddedContextManager {
   transformToolResult(result: EmbeddedToolResult): Promise<EmbeddedToolResult>;
 
   snapshot(): EmbeddedContextSnapshot;
+
+  /**
+   * Stop active LCM behavior while retaining recovery files for the host's
+   * remaining lifetime. The host should call dispose() when the session ends.
+   */
+  deactivate?(): void;
+
+  /**
+   * Permanently release this manager and clean up any manager-owned recovery
+   * storage.
+   */
   dispose(): void;
 }

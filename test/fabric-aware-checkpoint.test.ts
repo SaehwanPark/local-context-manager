@@ -260,11 +260,12 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
         makeFabricSnapshot({
           active: true,
           quiescent: false,
-          runningChildren: 1,
-          unresolvedChildTasks: 1,
+          runningChildren: 0,
+          unresolvedChildTasks: 0,
           mutableHolds: 0,
           pendingRootRequests: 1,
           pendingRootDeliveries: 0,
+          quiescenceReasons: ["pending_root_requests"],
         }),
       ),
     });

@@ -2,6 +2,14 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
+## Unreleased
+
+### Fixed
+
+- **Provider-Owned Fabric Quiescence**: Semantic compaction and reset recommendations now trust the safe-agent provider's complete `quiescent` projection, while retaining only the narrowly justified root-only settled-event lag exception.
+- **Strict Fabric Snapshot Validation**: Require safe integer counters and reject contradictory known active snapshots that claim session replacement is safe while non-quiescent.
+- **Recovery-Safe Embedded Deactivation**: Embedded managers expose a non-destructive `deactivate()` lifecycle so companion hosts can fall back to native context handling without deleting recovery files still referenced by the transcript; `dispose()` remains final cleanup.
+
 ## [0.4.2] - 2026-09-08
 
 This release addresses the second round cross-project audit feedback to harden interoperability with `pi-safe-agent-team` V1 schema, robust session identity resolution, fail-closed fabric coordination, and embedded context isolation.
