@@ -30,25 +30,82 @@ export interface FabricResourceSnapshot {
 }
 
 export interface FabricStateSnapshotV1 {
+  version: 1;
   active: boolean;
   quiescent: boolean;
+  state: "known" | "uncertain";
+  sessionReplacementSafe: boolean;
+  capturedAt: number;
+  rootSessionId?: string;
+  cwd?: string;
+
   runningChildren: number;
   unresolvedChildTasks: number;
   mutableHolds: number;
+  activeWriteFences: number;
   pendingRootRequests: number;
   pendingRootDeliveries: number;
+
   activeTasks?: FabricTaskSnapshot[];
   mutableResources?: FabricResourceSnapshot[];
+  quiescenceReasons?: string[];
   timestamp?: number;
 }
 
 export interface FabricStateProviderV1 {
-  getSnapshot?(request: FabricSnapshotRequest): FabricStateSnapshotV1 | Promise<FabricStateSnapshotV1>;
+  getSnapshot?(request: FabricSnapshotRequest): FabricStateSnapshotV1 | Promise<FabricStateSnapshotV1 | null>;
 }
 
 export type FabricStateProviderFunction = (
   request: FabricSnapshotRequest,
-) => FabricStateSnapshotV1 | Promise<FabricStateSnapshotV1>;
+) => FabricStateSnapshotV1 | Promise<FabricStateSnapshotV1 | null>;
+
+export type FabricObservation =
+  | { kind: "absent" }
+  | { kind: "known"; snapshot: FabricStateSnapshotV1 }
+  | { kind: "uncertain"; reason: string; snapshot?: FabricStateSnapshotV1 };
+
+export function resolveSessionId(sessionManager: unknown): string | undefined {
+  if (!sessionManager || typeof sessionManager !== "object") {
+    return undefined;
+  }
+  const mgr = sessionManager as { getSessionId?: () => unknown; sessionId?: unknown };
+  if (typeof mgr.getSessionId === "function") {
+    try {
+      const id = mgr.getSessionId();
+      if (typeof id === "string" && id.trim()) {
+        return id.trim();
+      }
+    } catch {
+      // Ignore accessor failure
+    }
+  }
+  if (typeof mgr.sessionId === "string" && mgr.sessionId.trim()) {
+    return mgr.sessionId.trim();
+  }
+  return undefined;
+}
+
+export function resolveSessionFile(sessionManager: unknown): string | undefined {
+  if (!sessionManager || typeof sessionManager !== "object") {
+    return undefined;
+  }
+  const mgr = sessionManager as { getSessionFile?: () => unknown; sessionFile?: unknown };
+  if (typeof mgr.getSessionFile === "function") {
+    try {
+      const file = mgr.getSessionFile();
+      if (typeof file === "string" && file.trim()) {
+        return file.trim();
+      }
+    } catch {
+      // Ignore accessor failure
+    }
+  }
+  if (typeof mgr.sessionFile === "string" && mgr.sessionFile.trim()) {
+    return mgr.sessionFile.trim();
+  }
+  return undefined;
+}
 
 export function getInteropRegistry(): PiExtensionInteropRegistryV1 {
   const globalObj = globalThis as unknown as Record<symbol, PiExtensionInteropRegistryV1 | undefined>;
@@ -109,11 +166,8 @@ function clampString(value: unknown, maxLength = 120): string | undefined {
   return trimmed ? trimmed.slice(0, maxLength) : undefined;
 }
 
-function clampNumber(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
-    return Math.floor(value);
-  }
-  return 0;
+function isValidCounter(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 export function sanitizeFabricSnapshot(raw: unknown): FabricStateSnapshotV1 | undefined {
@@ -122,77 +176,148 @@ export function sanitizeFabricSnapshot(raw: unknown): FabricStateSnapshotV1 | un
   }
   const record = raw as Record<string, unknown>;
 
-  const active = Boolean(record.active);
-  const quiescent = active ? Boolean(record.quiescent) : true;
-  const runningChildren = clampNumber(record.runningChildren);
-  const unresolvedChildTasks = clampNumber(record.unresolvedChildTasks);
-  const mutableHolds = clampNumber(record.mutableHolds);
-  const pendingRootRequests = clampNumber(record.pendingRootRequests);
-  const pendingRootDeliveries = clampNumber(record.pendingRootDeliveries);
+  // Fail closed if version is not 1
+  if (record.version !== 1) {
+    return undefined;
+  }
 
-  const rawTasks = Array.isArray(record.activeTasks) ? record.activeTasks : [];
-  const activeTasks: FabricTaskSnapshot[] = [];
-  for (const item of rawTasks.slice(0, 10)) {
-    if (item && typeof item === "object") {
-      const taskRecord = item as Record<string, unknown>;
-      const id = clampString(taskRecord.id, 64) ?? "unknown";
-      const status = clampString(taskRecord.status, 32) ?? "active";
-      const owner = clampString(taskRecord.owner, 64);
-      const description = clampString(taskRecord.description, 120);
-      const task: FabricTaskSnapshot = { id, status };
-      if (owner !== undefined) task.owner = owner;
-      if (description !== undefined) task.description = description;
-      activeTasks.push(task);
+  // Active and quiescent must be explicit booleans
+  if (typeof record.active !== "boolean" || typeof record.quiescent !== "boolean") {
+    return undefined;
+  }
+
+  // State must be known or uncertain
+  if (record.state !== "known" && record.state !== "uncertain") {
+    return undefined;
+  }
+
+  // sessionReplacementSafe must be explicit boolean
+  if (typeof record.sessionReplacementSafe !== "boolean") {
+    return undefined;
+  }
+
+  // capturedAt or legacy timestamp alias must be positive finite number
+  const capturedAtRaw = record.capturedAt ?? record.timestamp;
+  if (typeof capturedAtRaw !== "number" || !Number.isFinite(capturedAtRaw) || capturedAtRaw <= 0) {
+    return undefined;
+  }
+  const capturedAt = capturedAtRaw;
+
+  // Validate all required counters fail-closed
+  if (
+    !isValidCounter(record.runningChildren) ||
+    !isValidCounter(record.unresolvedChildTasks) ||
+    !isValidCounter(record.mutableHolds) ||
+    !isValidCounter(record.activeWriteFences) ||
+    !isValidCounter(record.pendingRootRequests) ||
+    !isValidCounter(record.pendingRootDeliveries)
+  ) {
+    return undefined;
+  }
+
+  const runningChildren = Math.floor(record.runningChildren);
+  const unresolvedChildTasks = Math.floor(record.unresolvedChildTasks);
+  const mutableHolds = Math.floor(record.mutableHolds);
+  const activeWriteFences = Math.floor(record.activeWriteFences);
+  const pendingRootRequests = Math.floor(record.pendingRootRequests);
+  const pendingRootDeliveries = Math.floor(record.pendingRootDeliveries);
+
+  let quiescenceReasons: string[] = [];
+  if (record.quiescenceReasons !== undefined) {
+    if (!Array.isArray(record.quiescenceReasons)) {
+      return undefined;
+    }
+    quiescenceReasons = record.quiescenceReasons
+      .filter((item): item is string => typeof item === "string")
+      .map((s) => clampString(s, 120) ?? "")
+      .filter(Boolean);
+  }
+
+  let activeTasks: FabricTaskSnapshot[] | undefined;
+  if (record.activeTasks !== undefined) {
+    if (!Array.isArray(record.activeTasks)) {
+      return undefined;
+    }
+    activeTasks = [];
+    for (const item of record.activeTasks.slice(0, 50)) {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        const taskRecord = item as Record<string, unknown>;
+        const id = clampString(taskRecord.id, 64) ?? "unknown";
+        const status = clampString(taskRecord.status, 32) ?? "active";
+        const owner = clampString(taskRecord.owner, 64);
+        const description = clampString(taskRecord.description, 120);
+        const task: FabricTaskSnapshot = { id, status };
+        if (owner !== undefined) task.owner = owner;
+        if (description !== undefined) task.description = description;
+        activeTasks.push(task);
+      }
     }
   }
 
-  const rawResources = Array.isArray(record.mutableResources) ? record.mutableResources : [];
-  const mutableResources: FabricResourceSnapshot[] = [];
-  for (const item of rawResources.slice(0, 10)) {
-    if (item && typeof item === "object") {
-      const resRecord = item as Record<string, unknown>;
-      const id = clampString(resRecord.id, 64) ?? "unknown";
-      const path = clampString(resRecord.path, 120);
-      const holder = clampString(resRecord.holder, 64);
-      const res: FabricResourceSnapshot = { id };
-      if (path !== undefined) res.path = path;
-      if (holder !== undefined) res.holder = holder;
-      mutableResources.push(res);
+  let mutableResources: FabricResourceSnapshot[] | undefined;
+  if (record.mutableResources !== undefined) {
+    if (!Array.isArray(record.mutableResources)) {
+      return undefined;
+    }
+    mutableResources = [];
+    for (const item of record.mutableResources.slice(0, 50)) {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        const resRecord = item as Record<string, unknown>;
+        const id = clampString(resRecord.id, 64) ?? "unknown";
+        const path = clampString(resRecord.path, 120);
+        const holder = clampString(resRecord.holder, 64);
+        const res: FabricResourceSnapshot = { id };
+        if (path !== undefined) res.path = path;
+        if (holder !== undefined) res.holder = holder;
+        mutableResources.push(res);
+      }
     }
   }
 
-  const timestamp =
-    typeof record.timestamp === "number" && Number.isFinite(record.timestamp) && record.timestamp > 0
-      ? record.timestamp
-      : Date.now();
+  const rootSessionId = clampString(record.rootSessionId, 128);
+  const cwd = clampString(record.cwd, 512);
 
   const result: FabricStateSnapshotV1 = {
-    active,
-    quiescent,
+    version: 1,
+    active: record.active,
+    quiescent: record.quiescent,
+    state: record.state,
+    sessionReplacementSafe: record.sessionReplacementSafe,
+    capturedAt,
     runningChildren,
     unresolvedChildTasks,
     mutableHolds,
+    activeWriteFences,
     pendingRootRequests,
     pendingRootDeliveries,
-    timestamp,
+    quiescenceReasons,
+    timestamp: capturedAt,
   };
-  if (activeTasks.length > 0) {
+
+  if (rootSessionId !== undefined) {
+    result.rootSessionId = rootSessionId;
+  }
+  if (cwd !== undefined) {
+    result.cwd = cwd;
+  }
+  if (activeTasks && activeTasks.length > 0) {
     result.activeTasks = activeTasks;
   }
-  if (mutableResources.length > 0) {
+  if (mutableResources && mutableResources.length > 0) {
     result.mutableResources = mutableResources;
   }
+
   return result;
 }
 
-export async function queryFabricState(
+export async function queryFabricObservation(
   request: FabricSnapshotRequest,
-): Promise<FabricStateSnapshotV1 | undefined> {
+): Promise<FabricObservation> {
   const provider = getInteropProvider<FabricStateProviderV1 | FabricStateProviderFunction>(
     SAFE_AGENT_FABRIC_PROVIDER_NAME,
   );
   if (!provider) {
-    return undefined;
+    return { kind: "absent" };
   }
 
   try {
@@ -202,12 +327,41 @@ export async function queryFabricState(
     } else if (typeof provider === "function") {
       rawSnapshot = await (provider as FabricStateProviderFunction)(request);
     } else {
-      return undefined;
+      return { kind: "uncertain", reason: "Fabric provider has no callable getSnapshot method" };
     }
-    return sanitizeFabricSnapshot(rawSnapshot);
-  } catch {
-    return undefined;
+
+    if (rawSnapshot === null || rawSnapshot === undefined) {
+      return { kind: "uncertain", reason: "Fabric provider returned null or undefined snapshot" };
+    }
+
+    const snapshot = sanitizeFabricSnapshot(rawSnapshot);
+    if (!snapshot) {
+      return { kind: "uncertain", reason: "Fabric provider returned malformed or incompatible snapshot" };
+    }
+
+    if (snapshot.state === "uncertain") {
+      const reason =
+        snapshot.quiescenceReasons && snapshot.quiescenceReasons.length > 0
+          ? snapshot.quiescenceReasons.join(", ")
+          : "Fabric provider reported uncertain state";
+      return { kind: "uncertain", reason, snapshot };
+    }
+
+    return { kind: "known", snapshot };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { kind: "uncertain", reason: `Fabric query threw error: ${message}` };
   }
+}
+
+export async function queryFabricState(
+  request: FabricSnapshotRequest,
+): Promise<FabricStateSnapshotV1 | undefined> {
+  const observation = await queryFabricObservation(request);
+  if (observation.kind === "known" || observation.kind === "uncertain") {
+    return observation.snapshot;
+  }
+  return undefined;
 }
 
 export function isFabricQuiescent(snapshot?: FabricStateSnapshotV1): boolean {
@@ -216,3 +370,14 @@ export function isFabricQuiescent(snapshot?: FabricStateSnapshotV1): boolean {
   }
   return snapshot.quiescent;
 }
+
+export function isSessionReplacementSafe(observation: FabricObservation): boolean {
+  if (observation.kind === "absent") {
+    return true;
+  }
+  if (observation.kind === "uncertain") {
+    return false;
+  }
+  return observation.snapshot.sessionReplacementSafe && observation.snapshot.state === "known";
+}
+

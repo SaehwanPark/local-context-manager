@@ -27,6 +27,7 @@ import {
 } from "../src/checkpoint-reset.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import {
+  FabricSnapshotRequest,
   FabricStateSnapshotV1,
   getInteropRegistry,
   registerInteropProvider,
@@ -95,6 +96,30 @@ function makeExtensionHarness() {
   return { handlers, tools, commands };
 }
 
+function makeFabricSnapshot(overrides: Partial<FabricStateSnapshotV1> = {}): FabricStateSnapshotV1 {
+  const active = overrides.active ?? true;
+  const quiescent = overrides.quiescent ?? true;
+  const state = overrides.state ?? "known";
+  const sessionReplacementSafe = overrides.sessionReplacementSafe ?? (state === "known" && (active ? quiescent : true));
+  return {
+    version: 1,
+    active,
+    quiescent,
+    state,
+    sessionReplacementSafe,
+    capturedAt: overrides.capturedAt ?? Date.now(),
+    runningChildren: 0,
+    unresolvedChildTasks: 0,
+    mutableHolds: 0,
+    activeWriteFences: 0,
+    pendingRootRequests: 0,
+    pendingRootDeliveries: 0,
+    quiescenceReasons: quiescent ? [] : ["active_work"],
+    timestamp: overrides.capturedAt ?? Date.now(),
+    ...overrides,
+  };
+}
+
 function makeContext(tokens: number | null, contextWindow = 64_000, entries: SessionEntry[] = []) {
   const notifications: Array<{ message: string; type: string }> = [];
   return {
@@ -116,6 +141,7 @@ function makeContext(tokens: number | null, contextWindow = 64_000, entries: Ses
     sessionManager: {
       buildContextEntries: () => entries,
       getBranch: () => entries,
+      getSessionId: () => "sess-123",
       getSessionFile: () => "/work/project/session.jsonl",
     },
     ui: {
@@ -144,15 +170,7 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
     const context = makeContext(10_000, 64_000);
 
     registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
-      getSnapshot: vi.fn().mockResolvedValue({
-        active: true,
-        quiescent: true,
-        runningChildren: 0,
-        unresolvedChildTasks: 0,
-        mutableHolds: 0,
-        pendingRootRequests: 0,
-        pendingRootDeliveries: 0,
-      }),
+      getSnapshot: vi.fn().mockResolvedValue(makeFabricSnapshot()),
     });
 
     const resetTool = harness.tools.find((t) => t.name === "request_context_reset");
@@ -188,16 +206,16 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
 
     let isQuiescent = false;
     registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
-      getSnapshot: vi.fn().mockImplementation(() => ({
-        active: true,
-        quiescent: isQuiescent,
-        runningChildren: 1,
-        unresolvedChildTasks: 1,
-        mutableHolds: 1,
-        pendingRootRequests: 0,
-        pendingRootDeliveries: 0,
-        activeTasks: [{ id: "task-1", status: "running", owner: "child-agent" }],
-      })),
+      getSnapshot: vi.fn().mockImplementation(() =>
+        makeFabricSnapshot({
+          active: true,
+          quiescent: isQuiescent,
+          runningChildren: isQuiescent ? 0 : 1,
+          unresolvedChildTasks: isQuiescent ? 0 : 1,
+          mutableHolds: isQuiescent ? 0 : 1,
+          activeTasks: isQuiescent ? [] : [{ id: "task-1", status: "running", owner: "child-agent" }],
+        }),
+      ),
     });
 
     const sessionStart = harness.handlers.get("session_start")?.[0];
@@ -238,15 +256,17 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
     const context = makeContext(10_000, 64_000);
 
     registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
-      getSnapshot: vi.fn().mockResolvedValue({
-        active: true,
-        quiescent: false,
-        runningChildren: 1,
-        unresolvedChildTasks: 1,
-        mutableHolds: 0,
-        pendingRootRequests: 1,
-        pendingRootDeliveries: 0,
-      }),
+      getSnapshot: vi.fn().mockResolvedValue(
+        makeFabricSnapshot({
+          active: true,
+          quiescent: false,
+          runningChildren: 1,
+          unresolvedChildTasks: 1,
+          mutableHolds: 0,
+          pendingRootRequests: 1,
+          pendingRootDeliveries: 0,
+        }),
+      ),
     });
 
     const sessionStart = harness.handlers.get("session_start")?.[0];
@@ -274,15 +294,17 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
     const context = makeContext(58_000, 64_000);
 
     registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
-      getSnapshot: vi.fn().mockResolvedValue({
-        active: true,
-        quiescent: false,
-        runningChildren: 2,
-        unresolvedChildTasks: 2,
-        mutableHolds: 1,
-        pendingRootRequests: 0,
-        pendingRootDeliveries: 0,
-      }),
+      getSnapshot: vi.fn().mockResolvedValue(
+        makeFabricSnapshot({
+          active: true,
+          quiescent: false,
+          runningChildren: 2,
+          unresolvedChildTasks: 2,
+          mutableHolds: 1,
+          pendingRootRequests: 0,
+          pendingRootDeliveries: 0,
+        }),
+      ),
     });
 
     const sessionStart = harness.handlers.get("session_start")?.[0];
@@ -326,9 +348,10 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
 
   // Scenario E: User explicitly requests reset during child activity without --force
   it("Scenario E: user explicitly requests reset during child activity without --force - refuses reset with error and does not touch session", async () => {
-    const fabricSnapshot: FabricStateSnapshotV1 = {
+    const fabricSnapshot: FabricStateSnapshotV1 = makeFabricSnapshot({
       active: true,
       quiescent: false,
+      sessionReplacementSafe: false,
       runningChildren: 2,
       unresolvedChildTasks: 2,
       mutableHolds: 1,
@@ -341,8 +364,9 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
       mutableResources: [
         { id: "src/parser", path: "src/parser.ts", holder: "agent-4" },
       ],
+      quiescenceReasons: ["running_children_active", "active_mutable_holds"],
       timestamp: Date.now(),
-    };
+    });
 
     registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
       getSnapshot: vi.fn().mockResolvedValue(fabricSnapshot),
@@ -387,6 +411,7 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
       waitForIdle: vi.fn().mockResolvedValue(undefined),
       sessionManager: {
         getBranch: () => [],
+        getSessionId: () => "sess-test",
         getSessionFile: () => "/work/project/session.jsonl",
         buildContextEntries: () => [
           {
@@ -405,7 +430,6 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
         notify: (msg: string, type: string) => {
           notifications.push({ message: msg, type });
         },
-        confirm: vi.fn().mockResolvedValue(true),
       },
       newSession,
     };
@@ -430,17 +454,19 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
   it("Scenario E2: user explicitly requests reset with --force during child activity - prompts confirm and proceeds with forced snapshot", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "lcm-test-force-reset-"));
     try {
-      const fabricSnapshot: FabricStateSnapshotV1 = {
+      const fabricSnapshot: FabricStateSnapshotV1 = makeFabricSnapshot({
         active: true,
         quiescent: false,
+        sessionReplacementSafe: false,
         runningChildren: 2,
         unresolvedChildTasks: 1,
         mutableHolds: 0,
         pendingRootRequests: 0,
         pendingRootDeliveries: 0,
         activeTasks: [{ id: "T-1", status: "running", owner: "child-worker" }],
+        quiescenceReasons: ["running_children_active"],
         timestamp: Date.now(),
-      };
+      });
 
       registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
         getSnapshot: vi.fn().mockResolvedValue(fabricSnapshot),
@@ -465,6 +491,7 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
         waitForIdle: vi.fn().mockResolvedValue(undefined),
         sessionManager: {
           getBranch: () => [],
+          getSessionId: () => "sess-test",
           getSessionFile: () => join(tempDir, "session.jsonl"),
           buildContextEntries: () => [
             {
@@ -497,7 +524,7 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
         newSession,
       };
 
-      await runCheckpointReset("--force manual override", fakeCtx as any, {
+      await runCheckpointReset("--force", fakeCtx as any, {
         config: { ...DEFAULT_CONFIG, checkpointDirectory: tempDir },
         agentDir: tempDir,
         runCommand: vi.fn(async (_cmd, args) => {
@@ -511,11 +538,9 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
         previousResetCount: 0,
       });
 
-      expect(confirms).toContainEqual(
-        expect.objectContaining({
-          title: "Warning: Active child agents detected",
-        }),
-      );
+      expect(confirms.length).toBe(2);
+      expect(confirms[0].title).toBe("Warning: Active child agents detected");
+      expect(confirms[1].title).toBe("Approve checkpoint reset?");
       expect(newSession).toHaveBeenCalledTimes(1);
 
       const storage = getCheckpointStorageDirectory(
@@ -544,15 +569,16 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
 
   // Scenario E3: User requests reset with --force during child activity but declines confirm
   it("Scenario E3: user requests reset with --force during child activity but declines confirm - aborts reset", async () => {
-    const fabricSnapshot: FabricStateSnapshotV1 = {
+    const fabricSnapshot: FabricStateSnapshotV1 = makeFabricSnapshot({
       active: true,
       quiescent: false,
+      sessionReplacementSafe: false,
       runningChildren: 1,
       unresolvedChildTasks: 1,
       mutableHolds: 0,
       pendingRootRequests: 0,
       pendingRootDeliveries: 0,
-    };
+    });
 
     registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
       getSnapshot: vi.fn().mockResolvedValue(fabricSnapshot),
@@ -568,6 +594,7 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
       waitForIdle: vi.fn().mockResolvedValue(undefined),
       sessionManager: {
         getBranch: () => [],
+        getSessionId: () => "sess-test",
         getSessionFile: () => "/work/project/session.jsonl",
         buildContextEntries: () => [
           {
@@ -623,6 +650,7 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
       waitForIdle: vi.fn().mockResolvedValue(undefined),
       sessionManager: {
         getBranch: () => [],
+        getSessionId: () => "sess-test",
         getSessionFile: () => "/work/project/session.jsonl",
         buildContextEntries: () => [
           {
@@ -668,15 +696,18 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
     let isQuiescent = false;
 
     registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
-      getSnapshot: vi.fn().mockImplementation(() => ({
-        active: true,
-        quiescent: isQuiescent,
-        runningChildren: 1,
-        unresolvedChildTasks: 1,
-        mutableHolds: 0,
-        pendingRootRequests: 0,
-        pendingRootDeliveries: 0,
-      })),
+      getSnapshot: vi.fn().mockImplementation(() =>
+        makeFabricSnapshot({
+          active: true,
+          quiescent: isQuiescent,
+          sessionReplacementSafe: isQuiescent,
+          runningChildren: isQuiescent ? 0 : 1,
+          unresolvedChildTasks: isQuiescent ? 0 : 1,
+          mutableHolds: 0,
+          pendingRootRequests: 0,
+          pendingRootDeliveries: 0,
+        }),
+      ),
     });
 
     // Sub-case 1: Context tokens below threshold, semantic compaction requested
@@ -717,5 +748,268 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
     await agentSettled?.({}, context3);
     await flushImmediate();
     expect(context3.compact).toHaveBeenCalled();
+  });
+
+  // Scenario G: Scoping contract - getSessionId() is supplied, NOT getSessionFile()
+  it("Scenario G: fabric query uses getSessionId() for scoping and reserves getSessionFile() for parentSession lineage", async () => {
+    let capturedQuerySessionId: string | undefined;
+    const provider = {
+      getSnapshot: vi.fn().mockImplementation((req: FabricSnapshotRequest) => {
+        capturedQuerySessionId = req.sessionId;
+        if (req.sessionId !== "actual-pi-session-id") {
+          return null; // safe-agent rejects mismatched ID
+        }
+        return makeFabricSnapshot();
+      }),
+    };
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, provider);
+
+    const fakeCtx = {
+      mode: "tui" as const,
+      cwd: "/work/project",
+      model: { id: "test-model" },
+      modelRegistry: { hasConfiguredAuth: () => true },
+      waitForIdle: vi.fn().mockResolvedValue(undefined),
+      sessionManager: {
+        getBranch: () => [],
+        getSessionId: () => "actual-pi-session-id",
+        getSessionFile: () => "/work/project/sessions/actual-pi-session-id.jsonl",
+        buildContextEntries: () => [
+          {
+            type: "message",
+            id: "m1",
+            parentId: null,
+            timestamp: new Date().toISOString(),
+            message: { role: "user", content: [{ type: "text", text: "Test reset session ID scoping" }] },
+          },
+        ],
+      },
+      ui: {
+        notify: vi.fn(),
+        confirm: vi.fn().mockResolvedValue(false), // decline reset so it doesn't write
+      },
+      newSession: vi.fn(),
+    };
+
+    await runCheckpointReset("scope test", fakeCtx as any, {
+      config: DEFAULT_CONFIG,
+      agentDir: "/tmp/agent-dir",
+      runCommand: vi.fn(),
+      previousResetCount: 0,
+    });
+
+    expect(capturedQuerySessionId).toBe("actual-pi-session-id");
+    expect(capturedQuerySessionId).not.toBe("/work/project/sessions/actual-pi-session-id.jsonl");
+  });
+
+  // Scenario H: sessionReplacementSafe: false blocks reset even if runningChildren is 0
+  it("Scenario H: sessionReplacementSafe: false blocks reset even if child counters are 0", async () => {
+    const unreplacableSnapshot = makeFabricSnapshot({
+      active: true,
+      quiescent: false,
+      state: "known",
+      sessionReplacementSafe: false,
+      runningChildren: 0,
+      unresolvedChildTasks: 0,
+      mutableHolds: 0,
+      activeWriteFences: 2, // Fences prevent session replacement!
+      quiescenceReasons: ["active_write_fences"],
+    });
+
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
+      getSnapshot: vi.fn().mockResolvedValue(unreplacableSnapshot),
+    });
+
+    const notifications: Array<{ message: string; type: string }> = [];
+    const newSession = vi.fn();
+    const fakeCtx = {
+      mode: "tui" as const,
+      cwd: "/work/project",
+      model: { id: "test-model" },
+      modelRegistry: { hasConfiguredAuth: () => true },
+      waitForIdle: vi.fn().mockResolvedValue(undefined),
+      sessionManager: {
+        getBranch: () => [],
+        getSessionId: () => "sess-123",
+        getSessionFile: () => "/work/project/session.jsonl",
+        buildContextEntries: () => [
+          {
+            type: "message",
+            id: "m1",
+            parentId: null,
+            timestamp: new Date().toISOString(),
+            message: { role: "user", content: [{ type: "text", text: "Test fence safety" }] },
+          },
+        ],
+      },
+      ui: {
+        notify: (msg: string, type: string) => {
+          notifications.push({ message: msg, type });
+        },
+      },
+      newSession,
+    };
+
+    await runCheckpointReset("fence test", fakeCtx as any, {
+      config: DEFAULT_CONFIG,
+      agentDir: "/tmp/agent-dir",
+      runCommand: vi.fn(),
+      previousResetCount: 0,
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        message: expect.stringContaining("Cannot reset checkpoint: Delegated child work is active in safe-agent-team"),
+        type: "error",
+      }),
+    );
+    expect(notifications[0].message).toContain("2 write fence(s)");
+    expect(newSession).not.toHaveBeenCalled();
+  });
+
+  // Scenario I: Forced reset under provider query failure durably preserves uncertain status in archive
+  it("Scenario I: forced reset with provider query failure durably records uncertain coordination in archive", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lcm-test-uncertain-force-"));
+    try {
+      registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
+        getSnapshot: vi.fn().mockRejectedValue(new Error("Simulated broker crash")),
+      });
+
+      const checkpointSections = [
+        "## Goals\n- Test durability under uncertain provider.",
+        "## Standing Constraints\n- none",
+        "## Decisions and Rationale\n- force reset anyway",
+        "## Work Completed\n- work",
+        "## Relevant Files\n- none",
+        "## Verification\n- verify",
+        "## Problems Encountered\n- broker crashed",
+        "## Rejected Approaches\n- none",
+        "## Unresolved Issues\n- uncertain child state",
+        "## Follow-ups\n- none",
+        "## Historical Notes\n- none",
+      ].join("\n\n");
+      const capsuleSections = [
+        "## Active Goals\n- Test durability under uncertain provider.",
+        "## Standing Constraints\n- none",
+        "## Durable Decisions\n- force reset anyway",
+        "## Outstanding Work\n- none",
+      ].join("\n\n");
+
+      const responses = [checkpointSections, capsuleSections];
+      const newSession = vi.fn().mockResolvedValue(undefined);
+
+      const fakeCtx = {
+        mode: "tui" as const,
+        cwd: tempDir,
+        model: { id: "test-model", maxTokens: 16_384 },
+        modelRegistry: {
+          hasConfiguredAuth: () => true,
+          complete: vi.fn(async () => ({
+            stopReason: "stop",
+            content: [{ type: "text", text: responses.shift() ?? "" }],
+          })),
+        },
+        waitForIdle: vi.fn().mockResolvedValue(undefined),
+        sessionManager: {
+          getBranch: () => [],
+          getSessionId: () => "sess-123",
+          getSessionFile: () => join(tempDir, "session.jsonl"),
+          buildContextEntries: () => [
+            {
+              type: "message",
+              id: "m1",
+              parentId: null,
+              timestamp: new Date().toISOString(),
+              message: { role: "user", content: [{ type: "text", text: "Force reset test" }] },
+            },
+          ],
+        },
+        ui: {
+          notify: vi.fn(),
+          confirm: vi.fn().mockResolvedValue(true),
+          custom: vi.fn(async (factory: any) => {
+            return new Promise<unknown>((resolve) => {
+              factory(undefined, { fg: (_n: string, t: string) => t }, {}, resolve);
+            });
+          }),
+          editor: vi.fn(async (_title: string, prefill?: string) => prefill),
+        },
+        newSession,
+      };
+
+      await runCheckpointReset("--force forced with failed provider", fakeCtx as any, {
+        config: { ...DEFAULT_CONFIG, checkpointDirectory: tempDir },
+        agentDir: tempDir,
+        runCommand: vi.fn(async (_cmd, args) => {
+          const key = args.join(" ");
+          if (key.includes("rev-parse --show-toplevel")) return { stdout: tempDir, stderr: "", code: 0 };
+          if (key.includes("rev-parse --abbrev-ref HEAD")) return { stdout: "main", stderr: "", code: 0 };
+          if (key.includes("rev-parse HEAD")) return { stdout: "abcdef123", stderr: "", code: 0 };
+          if (key.includes("status --porcelain")) return { stdout: "", stderr: "", code: 0 };
+          return { stdout: "", stderr: "", code: 0 };
+        }),
+        previousResetCount: 0,
+      });
+
+      expect(newSession).toHaveBeenCalledTimes(1);
+
+      const storage = getCheckpointStorageDirectory(
+        { ...DEFAULT_CONFIG, checkpointDirectory: tempDir },
+        tempDir,
+        tempDir,
+        { workingDirectory: tempDir, repositoryRoot: tempDir, branch: "main", head: "abcdef123", workingTree: "clean" },
+      );
+      const files = await listCheckpointFiles(storage);
+      expect(files.length).toBe(1);
+      const content = await readFile(files[0].path, "utf8");
+
+      expect(content).toContain("Coordination: uncertain (FORCED reset)");
+      expect(content).toContain("Reset status: FORCED while coordination safety state was UNCERTAIN");
+      expect(content).toContain("Uncertainty reason: Fabric query threw error: Simulated broker crash");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // Scenario J: agent_settled handles transient root-only lag without deferring semantic compaction
+  it("Scenario J: agent_settled does not defer semantic compaction when the only quiescence reason is root_agent_active_or_running", async () => {
+    const harness = makeExtensionHarness();
+
+    // Fabric reports active with ONLY root_agent_active_or_running, while child counters are 0
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
+      getSnapshot: vi.fn().mockResolvedValue(
+        makeFabricSnapshot({
+          active: true,
+          quiescent: false,
+          sessionReplacementSafe: false,
+          runningChildren: 0,
+          unresolvedChildTasks: 0,
+          mutableHolds: 0,
+          activeWriteFences: 0,
+          pendingRootRequests: 0,
+          pendingRootDeliveries: 0,
+          quiescenceReasons: ["root_agent_active_or_running"],
+        }),
+      ),
+    });
+
+    const context = makeContext(10_000, 64_000, compactionHistory());
+    const sessionStart = harness.handlers.get("session_start")?.[0];
+    await sessionStart?.({}, context);
+
+    const compactionTool = harness.tools.find((t) => t.name === "request_context_compaction");
+    await (compactionTool?.execute as any)("call-1", { reason: "Phase complete" });
+
+    const agentSettled = harness.handlers.get("agent_settled")?.[0];
+    await agentSettled?.({}, context);
+    await flushImmediate();
+
+    // Semantic compaction should NOT be deferred because Pi itself emitted agent_settled
+    expect(context.notifications).not.toContainEqual(
+      expect.objectContaining({
+        message: expect.stringContaining("Semantic compaction deferred: delegated child agents are still active."),
+      }),
+    );
+    expect(context.compact).toHaveBeenCalled();
   });
 });

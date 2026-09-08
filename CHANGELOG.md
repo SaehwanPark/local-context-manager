@@ -2,6 +2,23 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
+## [0.4.2] - 2026-09-08
+
+This release addresses the second round cross-project audit feedback to harden interoperability with `pi-safe-agent-team` V1 schema, robust session identity resolution, fail-closed fabric coordination, and embedded context isolation.
+
+### Fixed
+
+- **Decouple Pi Session ID from Session File**: Refactored `resolveSessionId` and `resolveSessionFile` to ensure interop fabric queries are strictly scoped by Pi session ID (`getSessionId()`), reserving file paths (`getSessionFile()`) for durable parent session lineage and diagnostics.
+- **Fail-Closed V1 Fabric State Sanitization**: Aligned `FabricStateSnapshotV1` with safe-agent V1 schema (`state: "known" | "uncertain"`, `sessionReplacementSafe: boolean`, `capturedAt: number`, non-negative integer counters). Sanitization strictly validates all fields, failing closed to an explicit `{ kind: "uncertain" }` observation on missing or malformed data.
+- **Fail-Safe Embedded Tool Output Recovery**: If `SessionRecoveryStorage` fails to save or is unavailable during embedded tool output reduction, the original tool output is preserved byte-for-byte, evidence reduction counters are not incremented, and a warning diagnostic is emitted.
+- **Transient Root Settled Race Handling**: In `agent_settled`, recognized broker `root_agent_active_or_running` transient quiescence lag so non-destructive semantic compaction is not deferred when child counters are 0, while destructive `/checkpoint-reset` continues to enforce `sessionReplacementSafe: true`.
+- **Per-Instance Embedded Recovery Storage Isolation**: Embedded context manager instances now manage dedicated `SessionRecoveryStorage` instances, cleanly disposing of temporary storage on `dispose()` without cross-instance contention.
+- **Durably Archived Uncertain Coordination on Forced Reset**: Forced checkpoint reset (`/checkpoint-reset --force`) during fabric query failure or uncertain state now archives explicit `Coordination: uncertain (FORCED reset)` metadata with full failure details in checkpoints and continuation capsules.
+- **Portable Smoke Test Suite**: Replaced hardcoded developer directory paths in smoke tests with dynamic environment variable detection and fallback discovery, skipping cleanly when peer repositories are not present.
+- **Granular Context Stats**: `/context-stats` reports detailed fabric coordination status (`unavailable`, `inactive`, `active (quiescent)`, `active (busy: ...)`, or `uncertain (...)`).
+- **Clean Interop Provider Registration**: Fixed duplicate provider registrations across extension factory calls by establishing a singleton provider object registered at module load.
+- **Robust Token Usage Nullish Check**: Fixed token source comparison for `usage?.tokens != null`.
+
 ## [0.4.1] - 2026-09-08
 
 This release addresses cross-project audit feedback to ensure safe coordination with `pi-safe-agent-team` and upstream Pi SDK contracts.

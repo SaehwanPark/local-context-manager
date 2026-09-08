@@ -62,10 +62,9 @@ import {
   createEmbeddedContextManager,
   getInteropProvider,
   LCM_EMBEDDED_CONTEXT_PROVIDER_NAME,
-  queryFabricState,
+  queryFabricObservation,
   registerInteropProvider,
-  SAFE_AGENT_FABRIC_PROVIDER_NAME,
-  type FabricStateSnapshotV1,
+  resolveSessionId,
 } from "./embedded/index.js";
 
 const EXTENSION_STATUS_KEY = "local-context-manager";
@@ -380,18 +379,16 @@ async function buildCustomCompaction(
   }
 }
 
-// Register LCM embedded controller factory in the process-local interop registry
-registerInteropProvider(LCM_EMBEDDED_CONTEXT_PROVIDER_NAME, {
+// LCM embedded controller provider instance registered once at module scope
+// for the Pi process lifetime so child agents and peers can discover it.
+const embeddedContextProvider = Object.freeze({
   version: 1,
   createEmbeddedContextManager,
 });
 
-export default function (pi: ExtensionAPI): void {
-  registerInteropProvider(LCM_EMBEDDED_CONTEXT_PROVIDER_NAME, {
-    version: 1,
-    createEmbeddedContextManager,
-  });
+registerInteropProvider(LCM_EMBEDDED_CONTEXT_PROVIDER_NAME, embeddedContextProvider);
 
+export default function (pi: ExtensionAPI): void {
   let config: LocalContextManagerConfig = { ...DEFAULT_CONFIG };
   let pathSettings: PiPathSettings | undefined;
   let telemetry = new ContextTelemetry();
@@ -682,32 +679,49 @@ export default function (pi: ExtensionAPI): void {
     const observed = observeContext(context, config, telemetry, gate);
     notifySoftWarning(context, config, telemetry, warned, observed);
 
-    const fabricProvider = getInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME);
-    let fabricSnapshot: FabricStateSnapshotV1 | undefined;
-    let fabricQueryFailed = false;
-    if (fabricProvider !== undefined) {
-      try {
-        let sessionFile: string | undefined;
-        try {
-          sessionFile = context.sessionManager.getSessionFile();
-        } catch {
-          sessionFile = undefined;
-        }
-        fabricSnapshot = await queryFabricState({
-          cwd: context.cwd,
-          ...(sessionFile ? { sessionId: sessionFile } : {}),
-        });
-        if (!fabricSnapshot) {
-          fabricQueryFailed = true;
-        }
-      } catch {
-        fabricQueryFailed = true;
-      }
+    let currentSessionId: string | undefined;
+    try {
+      currentSessionId = resolveSessionId(context.sessionManager);
+    } catch {
+      currentSessionId = undefined;
     }
 
-    const fabricActiveAndBusy = Boolean(fabricSnapshot?.active && !fabricSnapshot.quiescent);
-    const isFabricUncertain = fabricProvider !== undefined && (fabricQueryFailed || !fabricSnapshot);
-    const deferFabricWork = fabricActiveAndBusy || isFabricUncertain;
+    const observation = await queryFabricObservation({
+      cwd: context.cwd,
+      ...(currentSessionId ? { sessionId: currentSessionId } : {}),
+    });
+
+    const fabricSnapshot =
+      observation.kind === "known"
+        ? observation.snapshot
+        : observation.kind === "uncertain"
+          ? observation.snapshot
+          : undefined;
+    const isFabricUncertain = observation.kind === "uncertain";
+
+    // P1.1: agent_settled fabric query is extension-order/race sensitive.
+    // Check if fabric has active child work vs transient root projection lag.
+    const hasActiveChildWork = Boolean(
+      fabricSnapshot &&
+        (fabricSnapshot.runningChildren > 0 ||
+          fabricSnapshot.unresolvedChildTasks > 0 ||
+          fabricSnapshot.mutableHolds > 0 ||
+          fabricSnapshot.activeWriteFences > 0 ||
+          fabricSnapshot.pendingRootDeliveries > 0),
+    );
+
+    // If only reason is root_agent_active_or_running, but Pi itself emitted agent_settled,
+    // this is transient projection lag in the safe-agent broker.
+    const isRootOnlyLag = Boolean(
+      fabricSnapshot &&
+        !hasActiveChildWork &&
+        fabricSnapshot.quiescenceReasons?.length === 1 &&
+        fabricSnapshot.quiescenceReasons[0] === "root_agent_active_or_running",
+    );
+
+    // For non-destructive semantic operations (semantic compaction & recommendation),
+    // defer only if there are active children or true uncertainty (not transient root lag).
+    const deferFabricWork = (hasActiveChildWork || isFabricUncertain) && !isRootOnlyLag;
 
     if (checkpointResetRequested) {
       const reason = checkpointResetReason;
@@ -797,7 +811,7 @@ export default function (pi: ExtensionAPI): void {
     }
     const postTokens =
       usage?.tokens ?? (activeEntries.length > 0 ? estimateActiveContextTokens(activeEntries) : null);
-    const tokenSource = usage?.tokens !== null ? "pi-estimate" : "local-fallback";
+    const tokenSource = usage?.tokens != null ? "pi-estimate" : "local-fallback";
 
     telemetry.markCompaction(
       parseTimestamp(event.compactionEntry.timestamp) ?? Date.now(),
@@ -988,30 +1002,45 @@ export default function (pi: ExtensionAPI): void {
 
     const embeddedAvailable = getInteropProvider(LCM_EMBEDDED_CONTEXT_PROVIDER_NAME) !== undefined;
     let fabricStatus = "unavailable";
-    const fabricProvider = getInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME);
-    if (fabricProvider) {
-      try {
-        let sessionFile: string | undefined;
-        try {
-          sessionFile = context.sessionManager.getSessionFile();
-        } catch {
-          sessionFile = undefined;
-        }
-        const snap = await queryFabricState({
-          cwd: context.cwd,
-          ...(sessionFile ? { sessionId: sessionFile } : {}),
-        });
-        fabricStatus = snap?.active ? "active" : "inactive";
-      } catch {
-        fabricStatus = "unavailable";
+    let currentSessionId: string | undefined;
+    try {
+      currentSessionId = resolveSessionId(context.sessionManager);
+    } catch {
+      currentSessionId = undefined;
+    }
+
+    const observation = await queryFabricObservation({
+      cwd: context.cwd,
+      ...(currentSessionId ? { sessionId: currentSessionId } : {}),
+    });
+
+    if (observation.kind === "absent") {
+      fabricStatus = "unavailable";
+    } else if (observation.kind === "uncertain") {
+      fabricStatus = `uncertain (${observation.reason})`;
+    } else {
+      const snap = observation.snapshot;
+      if (!snap.active) {
+        fabricStatus = "inactive";
+      } else if (snap.quiescent) {
+        fabricStatus = "active (quiescent)";
+      } else {
+        const reasons =
+          snap.quiescenceReasons && snap.quiescenceReasons.length > 0
+            ? `: ${snap.quiescenceReasons.join(", ")}`
+            : "";
+        fabricStatus = `active (busy${reasons})`;
       }
     }
 
+    const isFabricBusy = observation.kind === "known" && !observation.snapshot.quiescent;
+    const isFabricUncertainOrBusy = observation.kind === "uncertain" || isFabricBusy;
+
     const semanticResetStatus = checkpointResetRequested
-      ? (fabricStatus === "active" ? "deferred by active fabric" : "ready")
+      ? (isFabricUncertainOrBusy ? "deferred by active fabric" : "ready")
       : "ready";
     const semanticCompactionStatus = semanticRequested
-      ? (fabricStatus === "active" ? "deferred by active fabric" : "queued")
+      ? (isFabricUncertainOrBusy ? "deferred by active fabric" : "queued")
       : "none";
 
     const details = [

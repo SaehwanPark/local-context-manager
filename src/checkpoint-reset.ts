@@ -17,9 +17,11 @@ import {
   validateStructuredOutput,
 } from "./continuation.js";
 import {
-  getInteropProvider,
-  queryFabricState,
-  SAFE_AGENT_FABRIC_PROVIDER_NAME,
+  isSessionReplacementSafe,
+  queryFabricObservation,
+  resolveSessionFile,
+  resolveSessionId,
+  type FabricObservation,
   type FabricStateSnapshotV1,
 } from "./embedded/interop.js";
 
@@ -121,6 +123,7 @@ export interface CheckpointResetInput {
   checkpointPath: string;
   conversationText: string;
   fabricState?: FabricStateSnapshotV1;
+  fabricObservation?: FabricObservation;
   forced?: boolean;
 }
 
@@ -320,45 +323,89 @@ export async function writeCheckpointAtomically(path: string, content: string): 
   }
 }
 
-export function formatCoordinationState(fabric?: FabricStateSnapshotV1, forced = false): string {
-  if (!fabric) {
+export function formatCoordinationState(
+  fabric?: FabricStateSnapshotV1,
+  forced = false,
+  observation?: FabricObservation,
+): string {
+  if (!fabric && (!observation || observation.kind === "absent")) {
     return "";
   }
-  const lines = [
-    "### Coordination State",
-    `- Fabric: ${fabric.active ? "active" : "inactive"}`,
-    `- Quiescent: ${fabric.quiescent ? "yes" : "no"}`,
-    `- Running children: ${fabric.runningChildren}`,
-    `- Unresolved child tasks: ${fabric.unresolvedChildTasks}`,
-    `- Mutable holds: ${fabric.mutableHolds}`,
-    `- Pending root requests: ${fabric.pendingRootRequests}`,
-  ];
-  if (forced) {
-    lines.push(
-      "- Reset status: FORCED during active child work; active descendants were subject to cancellation by session replacement",
-    );
-    lines.push("- Episode completion: partial (session forced before child quiescence)");
-  }
-  if (fabric.timestamp) {
-    lines.push(`- Captured at (point-in-time): ${new Date(fabric.timestamp).toISOString()}`);
-  }
-  if (fabric.activeTasks && fabric.activeTasks.length > 0) {
-    for (const task of fabric.activeTasks.slice(0, 10)) {
-      const owner = task.owner ? `, owner ${task.owner}` : "";
-      lines.push(`- Active task ${task.id} [${task.status}]${owner}`);
+
+  const lines = ["### Coordination State"];
+
+  if (observation?.kind === "uncertain" && !fabric) {
+    lines.push("- Fabric: uncertain (provider registered but query failed or returned malformed/null snapshot)");
+    lines.push(`- Uncertainty reason: ${observation.reason}`);
+    if (forced) {
+      lines.push("- Reset status: FORCED while coordination safety state was UNCERTAIN");
+      lines.push("- Episode completion: partial (session forced without verified child quiescence)");
     }
+    return lines.join("\n");
   }
-  if (fabric.mutableResources && fabric.mutableResources.length > 0) {
-    for (const res of fabric.mutableResources.slice(0, 10)) {
-      const holder = res.holder ? `, holder ${res.holder}` : "";
-      const path = res.path ? ` ${res.path}` : "";
-      lines.push(`- Mutable resource ${res.id}${path}${holder}`);
+
+  if (fabric) {
+    lines.push(`- Fabric: ${fabric.active ? "active" : "inactive"}`);
+    lines.push(`- State: ${fabric.state}`);
+    lines.push(`- Quiescent: ${fabric.quiescent ? "yes" : "no"}`);
+    lines.push(`- Session replacement safe: ${fabric.sessionReplacementSafe ? "yes" : "no"}`);
+    lines.push(`- Running children: ${fabric.runningChildren}`);
+    lines.push(`- Unresolved child tasks: ${fabric.unresolvedChildTasks}`);
+    lines.push(`- Mutable holds: ${fabric.mutableHolds}`);
+    lines.push(`- Active write fences: ${fabric.activeWriteFences}`);
+    lines.push(`- Pending root requests: ${fabric.pendingRootRequests}`);
+    lines.push(`- Pending root deliveries: ${fabric.pendingRootDeliveries}`);
+
+    if (fabric.quiescenceReasons && fabric.quiescenceReasons.length > 0) {
+      lines.push(`- Quiescence reasons: ${fabric.quiescenceReasons.join(", ")}`);
     }
+
+    if (forced) {
+      if (fabric.state === "uncertain") {
+        lines.push(
+          "- Reset status: FORCED while coordination safety state was UNCERTAIN; active descendants were subject to cancellation",
+        );
+      } else {
+        lines.push(
+          "- Reset status: FORCED during active child work; active descendants were subject to cancellation by session replacement",
+        );
+      }
+      lines.push("- Episode completion: partial (session forced before child quiescence)");
+    }
+
+    const timestamp = fabric.capturedAt || fabric.timestamp;
+    if (timestamp) {
+      lines.push(`- Captured at (point-in-time): ${new Date(timestamp).toISOString()}`);
+    }
+    if (fabric.rootSessionId) {
+      lines.push(`- Root session ID: ${fabric.rootSessionId}`);
+    }
+
+    if (fabric.activeTasks && fabric.activeTasks.length > 0) {
+      for (const task of fabric.activeTasks.slice(0, 10)) {
+        const owner = task.owner ? `, owner ${task.owner}` : "";
+        lines.push(`- Active task ${task.id} [${task.status}]${owner}`);
+      }
+    }
+    if (fabric.mutableResources && fabric.mutableResources.length > 0) {
+      for (const res of fabric.mutableResources.slice(0, 10)) {
+        const holder = res.holder ? `, holder ${res.holder}` : "";
+        const path = res.path ? ` ${res.path}` : "";
+        lines.push(`- Mutable resource ${res.id}${path}${holder}`);
+      }
+    }
+    return lines.join("\n");
   }
-  return lines.join("\n");
+
+  return "";
 }
 
-export function formatRepositoryState(state: RepositoryState, fabric?: FabricStateSnapshotV1, forced = false): string {
+export function formatRepositoryState(
+  state: RepositoryState,
+  fabric?: FabricStateSnapshotV1,
+  forced = false,
+  observation?: FabricObservation,
+): string {
   const base = [
     `- Working directory: ${knownOrUnknown(state.workingDirectory)}`,
     `- Repository: ${knownOrUnknown(state.repositoryRoot)}`,
@@ -367,7 +414,7 @@ export function formatRepositoryState(state: RepositoryState, fabric?: FabricSta
     `- Working tree: ${state.workingTree}`,
   ].join("\n");
 
-  const coordination = formatCoordinationState(fabric, forced);
+  const coordination = formatCoordinationState(fabric, forced, observation);
   return coordination ? `${base}\n\n${coordination}` : base;
 }
 
@@ -382,24 +429,29 @@ function formatCheckpointMetadata(input: CheckpointResetInput): string {
     `- Parent Pi session: ${knownOrUnknown(input.parentSession)}`,
     `- Reason: ${knownOrUnknown(input.reason)}`,
   ];
-  if (input.fabricState) {
-    const status = input.fabricState.active
-      ? input.fabricState.quiescent
-        ? "active (quiescent)"
-        : input.forced
-          ? "active (non-quiescent, FORCED reset)"
-          : "active (non-quiescent)"
-      : "inactive";
+
+  const coordination = formatCoordinationState(input.fabricState, input.forced, input.fabricObservation);
+  if (coordination) {
+    let status = "inactive";
+    if (input.fabricObservation?.kind === "uncertain") {
+      status = "uncertain (FORCED reset)";
+    } else if (input.fabricState) {
+      status = input.fabricState.active
+        ? input.fabricState.sessionReplacementSafe
+          ? "active (quiescent)"
+          : input.forced
+            ? "active (non-quiescent, FORCED reset)"
+            : "active (non-quiescent)"
+        : "inactive";
+    }
     lines.push(`- Coordination: ${status}`);
     if (input.forced) {
       lines.push("- Forced: yes (active child agents cancelled/subject to cancellation)");
     }
-    const coordination = formatCoordinationState(input.fabricState, input.forced);
-    if (coordination) {
-      lines.push("");
-      lines.push(coordination);
-    }
+    lines.push("");
+    lines.push(coordination);
   }
+
   return lines.join("\n");
 }
 
@@ -445,7 +497,7 @@ export function buildCapsuleDocument(
     sections[0],
     sections[1],
     "## Current Repository State",
-    formatRepositoryState(input.repositoryState, input.fabricState, input.forced),
+    formatRepositoryState(input.repositoryState, input.fabricState, input.forced, input.fabricObservation),
     sections[2],
     sections[3],
     "## Archived Context",
@@ -461,7 +513,7 @@ export function buildCheckpointPrompt(input: CheckpointResetInput): string {
     `Reason supplied by the user: ${knownOrUnknown(input.reason)}`,
     "",
     "## Recorded Repository Metadata",
-    formatRepositoryState(input.repositoryState, input.fabricState, input.forced),
+    formatRepositoryState(input.repositoryState, input.fabricState, input.forced, input.fabricObservation),
     `- Parent Pi session: ${knownOrUnknown(input.parentSession)}`,
     `- Created: ${knownOrUnknown(input.createdAt)}`,
     "",
@@ -479,7 +531,7 @@ export function buildCapsulePrompt(input: CheckpointResetInput): string {
     `Reason supplied by the user: ${knownOrUnknown(input.reason)}`,
     "",
     "## Recorded Repository Metadata",
-    formatRepositoryState(input.repositoryState, input.fabricState, input.forced),
+    formatRepositoryState(input.repositoryState, input.fabricState, input.forced, input.fabricObservation),
     "",
     "## Archived Checkpoint Pointer",
     input.checkpointPath,
@@ -713,36 +765,39 @@ export async function runCheckpointReset(
 
   let parentSession: string | undefined;
   try {
-    parentSession = ctx.sessionManager.getSessionFile();
+    parentSession = resolveSessionFile(ctx.sessionManager);
   } catch {
     parentSession = undefined;
   }
 
-  const fabricProvider = getInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME);
-  let fabricState: FabricStateSnapshotV1 | undefined;
-  let fabricQueryFailed = false;
-  if (fabricProvider !== undefined) {
-    try {
-      fabricState = await queryFabricState({
-        cwd: ctx.cwd,
-        ...(parentSession ? { sessionId: parentSession } : {}),
-      });
-      if (!fabricState) {
-        fabricQueryFailed = true;
-      }
-    } catch {
-      fabricQueryFailed = true;
-    }
+  let currentSessionId: string | undefined;
+  try {
+    currentSessionId = resolveSessionId(ctx.sessionManager);
+  } catch {
+    currentSessionId = undefined;
   }
 
-  const hasActiveChildren = Boolean(fabricState?.active && !fabricState.quiescent);
-  const isFabricUncertain = fabricProvider !== undefined && (fabricQueryFailed || !fabricState);
+  const observation = await queryFabricObservation({
+    cwd: ctx.cwd,
+    ...(currentSessionId ? { sessionId: currentSessionId } : {}),
+  });
 
-  if (hasActiveChildren || isFabricUncertain) {
+  const fabricState =
+    observation.kind === "known"
+      ? observation.snapshot
+      : observation.kind === "uncertain"
+        ? observation.snapshot
+        : undefined;
+  const isReplacementSafe = isSessionReplacementSafe(observation);
+
+  if (!isReplacementSafe) {
     if (!force) {
-      const activeDesc = fabricState
-        ? `Delegated child work is active in safe-agent-team (${fabricState.runningChildren} running child(ren), ${fabricState.unresolvedChildTasks} unresolved task(s), ${fabricState.mutableHolds} hold(s))`
-        : "Safe-agent fabric is registered but state query failed or is uncertain";
+      const activeDesc =
+        observation.kind === "uncertain"
+          ? `Safe-agent fabric is registered but state query failed or is uncertain (${observation.reason})`
+          : fabricState
+            ? `Delegated child work is active in safe-agent-team (${fabricState.runningChildren} running child(ren), ${fabricState.unresolvedChildTasks} unresolved task(s), ${fabricState.mutableHolds} hold(s), ${fabricState.activeWriteFences} write fence(s))`
+            : "Safe-agent fabric is active and not replacement-safe";
       ctx.ui.notify(
         `Cannot reset checkpoint: ${activeDesc}. Replacing the root Pi session would cancel in-flight children. Wait for children to complete or re-run with /checkpoint-reset --force.`,
         "error",
@@ -760,7 +815,7 @@ export async function runCheckpointReset(
     }
   }
 
-  const isForcedReset = Boolean(force && (hasActiveChildren || isFabricUncertain));
+  const isForcedReset = Boolean(force && !isReplacementSafe);
   const input: CheckpointResetInput = {
     createdAt,
     ...(reason ? { reason } : {}),
@@ -768,6 +823,7 @@ export async function runCheckpointReset(
     ...(parentSession ? { parentSession } : {}),
     checkpointPath,
     conversationText,
+    ...(observation.kind !== "absent" ? { fabricObservation: observation } : {}),
     ...(fabricState ? { fabricState } : {}),
     ...(isForcedReset ? { forced: true } : {}),
   };
