@@ -14,7 +14,7 @@ import {
   appendFullOutputNotice,
   extractFullOutputPath,
   reduceToolOutput,
-  saveRecoveryCopy,
+  SessionRecoveryStorage,
 } from "../tool-output.js";
 import type {
   EmbeddedCompactionRequest,
@@ -32,6 +32,8 @@ export class EmbeddedContextController implements EmbeddedContextManager {
   private readonly mode: "root" | "managed-child";
   private readonly evidenceTracker = new EvidenceReductionTracker();
   private readonly gate: CompactionGate;
+  private readonly recoveryStorage: SessionRecoveryStorage;
+  private readonly ownsRecoveryStorage: boolean;
 
   private currentTokens: number | null = null;
   private currentContextWindow: number | null = null;
@@ -43,6 +45,13 @@ export class EmbeddedContextController implements EmbeddedContextManager {
   constructor(host: EmbeddedContextHost, options: EmbeddedContextManagerOptions = {}) {
     this.host = host;
     this.mode = options.mode ?? "managed-child";
+    if (options.recoveryStorage) {
+      this.recoveryStorage = options.recoveryStorage;
+      this.ownsRecoveryStorage = false;
+    } else {
+      this.recoveryStorage = new SessionRecoveryStorage();
+      this.ownsRecoveryStorage = true;
+    }
 
     const baseConfig: LocalContextManagerConfig = {
       ...DEFAULT_CONFIG,
@@ -199,14 +208,10 @@ export class EmbeddedContextController implements EmbeddedContextManager {
       return result;
     }
 
-    if (reduction.category) {
-      this.evidenceTracker.record(reduction.category);
-    }
-
     let fullOutputPath = extractFullOutputPath(result.details, reduction.originalText);
     if (!fullOutputPath) {
       try {
-        fullOutputPath = await saveRecoveryCopy(reduction.originalText, result.toolName);
+        fullOutputPath = await this.recoveryStorage.save(reduction.originalText, result.toolName);
       } catch (error) {
         this.host.onDiagnostic?.({
           level: "warning",
@@ -216,18 +221,30 @@ export class EmbeddedContextController implements EmbeddedContextManager {
       }
     }
 
+    if (!fullOutputPath) {
+      // P0.3: Embedded output reduction can lose authoritative output if recovery storage fails.
+      // Match root LCM semantics: preserve original tool result byte-for-byte, do not record evidence reduction.
+      this.host.onDiagnostic?.({
+        level: "warning",
+        message: `Preserving original tool output because recovery storage is unavailable for ${result.toolName}`,
+      });
+      return result;
+    }
+
+    if (reduction.category) {
+      this.evidenceTracker.record(reduction.category);
+    }
+
     let content = reduction.content;
-    if (fullOutputPath) {
-      if (
-        !content.some(
-          (block) =>
-            block.type === "text" &&
-            block.text.toLowerCase().includes("full output") &&
-            block.text.includes(fullOutputPath),
-        )
-      ) {
-        content = appendFullOutputNotice(content, fullOutputPath);
-      }
+    if (
+      !content.some(
+        (block) =>
+          block.type === "text" &&
+          block.text.toLowerCase().includes("full output") &&
+          block.text.includes(fullOutputPath),
+      )
+    ) {
+      content = appendFullOutputNotice(content, fullOutputPath);
     }
 
     try {
@@ -267,6 +284,9 @@ export class EmbeddedContextController implements EmbeddedContextManager {
 
   dispose(): void {
     this.disposed = true;
+    if (this.ownsRecoveryStorage) {
+      void this.recoveryStorage.cleanup().catch(() => undefined);
+    }
   }
 }
 

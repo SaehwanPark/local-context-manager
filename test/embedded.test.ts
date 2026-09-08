@@ -9,7 +9,7 @@ import {
   registerEmbeddedContextManagerProvider,
 } from "../src/embedded/index.js";
 import { EVIDENCE_COMPLETENESS_NOTE } from "../src/evidence-provenance.js";
-import { NON_EXHAUSTIVE_NOTICE } from "../src/tool-output.js";
+import { NON_EXHAUSTIVE_NOTICE, SessionRecoveryStorage } from "../src/tool-output.js";
 
 describe("EmbeddedContextManager", () => {
   beforeEach(() => {
@@ -204,5 +204,87 @@ describe("EmbeddedContextManager", () => {
     const manager = provider!.createEmbeddedContextManager(host, { contextWindow: 128_000 });
     expect(manager).toBeDefined();
     expect(manager.snapshot().mode).toBe("managed-child");
+  });
+
+  it("preserves original tool output byte-for-byte when recovery storage fails", async () => {
+    const failingStorage = new SessionRecoveryStorage();
+    vi.spyOn(failingStorage, "save").mockResolvedValue(undefined);
+
+    const host = createMockHost();
+    const manager = createEmbeddedContextManager(host, {
+      contextWindow: 128_000,
+      recoveryStorage: failingStorage,
+    });
+
+    const originalText =
+      "error TS1000: fatal compilation error\n" +
+      "noise log line that is long enough to trigger reduction\n".repeat(300);
+    const result: EmbeddedToolResult = {
+      toolName: "bash",
+      input: { command: "npm test" },
+      content: [{ type: "text", text: originalText }],
+      isError: true,
+    };
+
+    const transformed = await manager.transformToolResult(result);
+
+    // Byte-for-byte preservation
+    expect((transformed.content[0] as { type: "text"; text: string }).text).toBe(originalText);
+    expect(transformed.content).toEqual(result.content);
+
+    // No reduction recorded
+    const snap = manager.snapshot();
+    expect(snap.toolOutputsReduced).toBe(0);
+    expect(snap.reducedOutputsSinceCompaction).toBe(0);
+
+    // Diagnostic emitted
+    expect(host.onDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: "warning",
+        message: expect.stringContaining("Preserving original tool output because recovery storage is unavailable"),
+      }),
+    );
+  });
+
+  it("isolates recovery storage across distinct embedded managers", async () => {
+    const hostA = createMockHost();
+    const hostB = createMockHost();
+
+    const managerA = createEmbeddedContextManager(hostA, { contextWindow: 128_000 });
+    const managerB = createEmbeddedContextManager(hostB, { contextWindow: 128_000 });
+
+    const makeLargeResult = (id: string): EmbeddedToolResult => ({
+      toolName: "bash",
+      input: { command: "build" },
+      content: [
+        {
+          type: "text",
+          text: `error TS${id}: failure\n` + "log line with enough content to exceed reduction threshold\n".repeat(300),
+        },
+      ],
+      isError: true,
+    });
+
+    const transformedA = await managerA.transformToolResult(makeLargeResult("A"));
+    const transformedB = await managerB.transformToolResult(makeLargeResult("B"));
+
+    const textA = (transformedA.content[0] as { text: string }).text;
+    const textB = (transformedB.content[0] as { text: string }).text;
+
+    const matchA = textA.match(/Full output saved to: (.*)/);
+    const matchB = textB.match(/Full output saved to: (.*)/);
+
+    expect(matchA).toBeDefined();
+    expect(matchB).toBeDefined();
+
+    const pathA = matchA![1];
+    const pathB = matchB![1];
+
+    // Different storage paths/directories
+    expect(pathA).not.toBe(pathB);
+
+    // Disposing managerA cleans up its files without impacting managerB
+    managerA.dispose();
+    managerB.dispose();
   });
 });

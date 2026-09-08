@@ -1,6 +1,6 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { LocalContextManagerConfig } from "../config.js";
-import type { ToolContentBlock } from "../tool-output.js";
+import type { SessionRecoveryStorage, ToolContentBlock } from "../tool-output.js";
 
 export type EmbeddedContextUsageSource =
   | "pi-estimate"
@@ -17,7 +17,6 @@ export interface EmbeddedContextUsage {
 export interface EmbeddedCompactionRequest {
   reason?: "threshold" | "semantic" | string;
   customInstructions?: string;
-  targetTokens?: number;
 }
 
 export interface EmbeddedContextSnapshot {
@@ -70,6 +69,12 @@ export interface EmbeddedContextManagerOptions {
    * Optional advertised model context window.
    */
   contextWindow?: number;
+
+  /**
+   * Optional per-instance recovery storage.
+   * If omitted, a dedicated SessionRecoveryStorage is created for this manager.
+   */
+  recoveryStorage?: SessionRecoveryStorage;
 }
 
 export interface EmbeddedToolResult {
