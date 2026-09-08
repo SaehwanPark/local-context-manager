@@ -86,7 +86,7 @@ describe("process-local extension interop registry and safe-agent V1 contract", 
       state: "known",
       sessionReplacementSafe: false,
       capturedAt: 1725800000000,
-      runningChildren: 3.8,
+      runningChildren: 3,
       unresolvedChildTasks: 1,
       mutableHolds: 2,
       activeWriteFences: 1,
@@ -116,7 +116,7 @@ describe("process-local extension interop registry and safe-agent V1 contract", 
     expect(sanitized.state).toBe("known");
     expect(sanitized.sessionReplacementSafe).toBe(false);
     expect(sanitized.capturedAt).toBe(1725800000000);
-    expect(sanitized.runningChildren).toBe(3); // Floored
+    expect(sanitized.runningChildren).toBe(3);
     expect(sanitized.unresolvedChildTasks).toBe(1);
     expect(sanitized.mutableHolds).toBe(2);
     expect(sanitized.activeWriteFences).toBe(1);
@@ -165,8 +165,10 @@ describe("process-local extension interop registry and safe-agent V1 contract", 
 
     // Negative or non-numeric counters
     expect(sanitizeFabricSnapshot({ ...baseValid, runningChildren: -1 })).toBeUndefined();
+    expect(sanitizeFabricSnapshot({ ...baseValid, runningChildren: 1.5 })).toBeUndefined();
     expect(sanitizeFabricSnapshot({ ...baseValid, activeWriteFences: "none" })).toBeUndefined();
     expect(sanitizeFabricSnapshot({ ...baseValid, mutableHolds: NaN })).toBeUndefined();
+    expect(sanitizeFabricSnapshot({ ...baseValid, quiescent: false, sessionReplacementSafe: true })).toBeUndefined();
   });
 
   it("queries fabric observation with explicit known and uncertain discrimination", async () => {

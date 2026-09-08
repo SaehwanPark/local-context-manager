@@ -40,6 +40,7 @@ export class EmbeddedContextController implements EmbeddedContextManager {
   private currentTokenSource: EmbeddedContextSnapshot["tokenSource"] = "unknown";
   private turnSerial = 0;
   private compactionsCount = 0;
+  private deactivated = false;
   private disposed = false;
 
   constructor(host: EmbeddedContextHost, options: EmbeddedContextManagerOptions = {}) {
@@ -130,18 +131,18 @@ export class EmbeddedContextController implements EmbeddedContextManager {
   }
 
   observeTurnStart(): void {
-    if (this.disposed) return;
+    if (this.disposed || this.deactivated) return;
     this.turnSerial += 1;
     this.refreshUsage();
   }
 
   observeTurnEnd(): void {
-    if (this.disposed) return;
+    if (this.disposed || this.deactivated) return;
     this.refreshUsage();
   }
 
   async observeSettled(): Promise<void> {
-    if (this.disposed || !this.config.enabled) {
+    if (this.disposed || this.deactivated || !this.config.enabled) {
       return;
     }
 
@@ -182,7 +183,7 @@ export class EmbeddedContextController implements EmbeddedContextManager {
   }
 
   async transformToolResult(result: EmbeddedToolResult): Promise<EmbeddedToolResult> {
-    if (this.disposed || !this.config.enabled || !this.config.toolOutputReduction) {
+    if (this.disposed || this.deactivated || !this.config.enabled || !this.config.toolOutputReduction) {
       return result;
     }
 
@@ -275,14 +276,25 @@ export class EmbeddedContextController implements EmbeddedContextManager {
       percentOfThreshold,
       thresholdRatio: percentOfThreshold !== null ? percentOfThreshold / 100 : undefined,
       mode: this.mode,
-      enabled: this.config.enabled,
+      enabled: this.config.enabled && !this.deactivated && !this.disposed,
       toolOutputsReduced: this.evidenceTracker.totalReducedCount,
       reducedOutputsSinceCompaction: this.evidenceTracker.reducedSinceLastCompactionCount,
       compactions: this.compactionsCount,
     };
   }
 
+  deactivate(): void {
+    if (this.disposed) return;
+    // Recovery files are intentionally retained. A reduced tool result may
+    // already be present in the child transcript, and deleting its referenced
+    // file during an embedded->native fallback would make that transcript
+    // unrecoverable.
+    this.deactivated = true;
+  }
+
   dispose(): void {
+    if (this.disposed) return;
+    this.deactivated = true;
     this.disposed = true;
     if (this.ownsRecoveryStorage) {
       void this.recoveryStorage.cleanup().catch(() => undefined);

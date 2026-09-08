@@ -167,7 +167,7 @@ function clampString(value: unknown, maxLength = 120): string | undefined {
 }
 
 function isValidCounter(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 export function sanitizeFabricSnapshot(raw: unknown): FabricStateSnapshotV1 | undefined {
@@ -193,6 +193,13 @@ export function sanitizeFabricSnapshot(raw: unknown): FabricStateSnapshotV1 | un
 
   // sessionReplacementSafe must be explicit boolean
   if (typeof record.sessionReplacementSafe !== "boolean") {
+    return undefined;
+  }
+
+  // A known active fabric cannot claim that session replacement is safe while
+  // simultaneously reporting non-quiescence. Treat contradictory snapshots as
+  // malformed rather than allowing a destructive caller to infer safety.
+  if (record.state === "known" && record.active && !record.quiescent && record.sessionReplacementSafe) {
     return undefined;
   }
 
@@ -380,4 +387,3 @@ export function isSessionReplacementSafe(observation: FabricObservation): boolea
   }
   return observation.snapshot.sessionReplacementSafe && observation.snapshot.state === "known";
 }
-
