@@ -3,9 +3,12 @@ export interface ContextUsageLike {
   contextWindow: number;
 }
 
+export type ContextTokenSource = "reported" | "estimated" | "unknown";
+
 export interface TelemetrySnapshot {
   contextTokens: number | null;
   contextWindow: number | null;
+  tokenSource: ContextTokenSource;
   compactThresholdTokens: number;
   percentOfThreshold: number | null;
   tokensAddedSinceCompaction: number | null;
@@ -24,6 +27,7 @@ export interface TelemetrySnapshot {
 export class ContextTelemetry {
   private contextTokens: number | null = null;
   private contextWindow: number | null = null;
+  private tokenSource: ContextTokenSource = "unknown";
   private baselineTokens: number | null = null;
   private tokensAddedSinceCompaction: number | null = null;
   private approximateToolOutputTokens = 0;
@@ -61,10 +65,12 @@ export class ContextTelemetry {
     if (usage.tokens === null || !Number.isFinite(usage.tokens) || usage.tokens < 0) {
       this.contextTokens = null;
       this.tokensAddedSinceCompaction = null;
+      this.tokenSource = "unknown";
       return;
     }
 
     this.setObservedTokens(usage.tokens);
+    this.tokenSource = "reported";
   }
 
   observeEstimate(tokens: number, contextWindow?: number): void {
@@ -72,9 +78,11 @@ export class ContextTelemetry {
       this.contextWindow = contextWindow;
     }
     if (!Number.isFinite(tokens) || tokens < 0) {
+      this.tokenSource = "unknown";
       return;
     }
     this.setObservedTokens(tokens);
+    this.tokenSource = "estimated";
   }
 
   private setObservedTokens(tokens: number): void {
@@ -119,13 +127,24 @@ export class ContextTelemetry {
     this.approximateToolOutputTokens = Number.isFinite(tokens) ? Math.max(0, Math.floor(tokens)) : 0;
   }
 
-  markCompaction(timestamp: number, turn: number, postTokens: number | null, activeToolOutputTokens: number): void {
+  markCompaction(
+    timestamp: number,
+    turn: number,
+    postTokens: number | null,
+    activeToolOutputTokens: number,
+    source?: ContextTokenSource,
+  ): void {
     this.compactions += 1;
     this.lastCompactionAt = Number.isFinite(timestamp) ? timestamp : Date.now();
     this.lastCompactionTurn = turn;
     this.baselineTokens = postTokens !== null && Number.isFinite(postTokens) ? postTokens : null;
     this.contextTokens = postTokens !== null && Number.isFinite(postTokens) ? postTokens : null;
     this.tokensAddedSinceCompaction = postTokens !== null && Number.isFinite(postTokens) ? 0 : null;
+    if (source) {
+      this.tokenSource = source;
+    } else if (postTokens === null) {
+      this.tokenSource = "unknown";
+    }
     this.setActiveToolOutputTokens(activeToolOutputTokens);
   }
 
@@ -148,6 +167,7 @@ export class ContextTelemetry {
     return {
       contextTokens: this.contextTokens,
       contextWindow: this.contextWindow,
+      tokenSource: this.tokenSource,
       compactThresholdTokens,
       percentOfThreshold,
       tokensAddedSinceCompaction: this.tokensAddedSinceCompaction,
@@ -179,7 +199,8 @@ export function formatTokenCount(tokens: number | null): string {
 }
 
 export function formatTelemetryStatus(snapshot: TelemetrySnapshot): string {
-  const context = formatTokenCount(snapshot.contextTokens);
+  const tokenFormatted = formatTokenCount(snapshot.contextTokens);
+  const context = snapshot.tokenSource === "estimated" && snapshot.contextTokens !== null ? `~${tokenFormatted}` : tokenFormatted;
   const threshold = formatTokenCount(snapshot.compactThresholdTokens);
   const percent = snapshot.percentOfThreshold === null ? "?" : `${Math.round(snapshot.percentOfThreshold)}%`;
   const added = formatTokenCount(snapshot.tokensAddedSinceCompaction);
@@ -188,8 +209,11 @@ export function formatTelemetryStatus(snapshot: TelemetrySnapshot): string {
 }
 
 export function formatTelemetryDetails(snapshot: TelemetrySnapshot): string {
+  const tokenFormatted = formatTokenCount(snapshot.contextTokens);
+  const sourceLabel = snapshot.tokenSource !== "unknown" ? ` (${snapshot.tokenSource})` : "";
   const lines = [
-    `Context: ${formatTokenCount(snapshot.contextTokens)} tokens`,
+    `Context: ${tokenFormatted} tokens${sourceLabel}`,
+    `Token source: ${snapshot.tokenSource}`,
     `Context window: ${formatTokenCount(snapshot.contextWindow)}`,
     `Compact threshold: ${formatTokenCount(snapshot.compactThresholdTokens)} tokens`,
     `Threshold consumed: ${snapshot.percentOfThreshold === null ? "unknown" : `${snapshot.percentOfThreshold.toFixed(1)}%`}`,

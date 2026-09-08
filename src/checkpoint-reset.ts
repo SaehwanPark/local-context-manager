@@ -16,6 +16,7 @@ import {
   limitText,
   validateStructuredOutput,
 } from "./continuation.js";
+import { queryFabricState, type FabricStateSnapshotV1 } from "./embedded/interop.js";
 
 export const CHECKPOINT_RESET_ENTRY_TYPE = "local-context-manager-checkpoint-reset";
 export const MAX_CHECKPOINT_INPUT_CHARS = 120_000;
@@ -114,6 +115,7 @@ export interface CheckpointResetInput {
   parentSession?: string;
   checkpointPath: string;
   conversationText: string;
+  fabricState?: FabricStateSnapshotV1;
 }
 
 export interface CheckpointResetArtifacts {
@@ -312,18 +314,53 @@ export async function writeCheckpointAtomically(path: string, content: string): 
   }
 }
 
-export function formatRepositoryState(state: RepositoryState): string {
-  return [
+export function formatCoordinationState(fabric?: FabricStateSnapshotV1): string {
+  if (!fabric) {
+    return "";
+  }
+  const lines = [
+    "### Coordination State",
+    `- Fabric: ${fabric.active ? "active" : "inactive"}`,
+    `- Quiescent: ${fabric.quiescent ? "yes" : "no"}`,
+    `- Running children: ${fabric.runningChildren}`,
+    `- Unresolved child tasks: ${fabric.unresolvedChildTasks}`,
+    `- Mutable holds: ${fabric.mutableHolds}`,
+    `- Pending root requests: ${fabric.pendingRootRequests}`,
+  ];
+  if (fabric.timestamp) {
+    lines.push(`- Captured at: ${new Date(fabric.timestamp).toISOString()}`);
+  }
+  if (fabric.activeTasks && fabric.activeTasks.length > 0) {
+    for (const task of fabric.activeTasks.slice(0, 10)) {
+      const owner = task.owner ? `, owner ${task.owner}` : "";
+      lines.push(`- Active task ${task.id} [${task.status}]${owner}`);
+    }
+  }
+  if (fabric.mutableResources && fabric.mutableResources.length > 0) {
+    for (const res of fabric.mutableResources.slice(0, 10)) {
+      const holder = res.holder ? `, holder ${res.holder}` : "";
+      const path = res.path ? ` ${res.path}` : "";
+      lines.push(`- Mutable resource ${res.id}${path}${holder}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+export function formatRepositoryState(state: RepositoryState, fabric?: FabricStateSnapshotV1): string {
+  const base = [
     `- Working directory: ${knownOrUnknown(state.workingDirectory)}`,
     `- Repository: ${knownOrUnknown(state.repositoryRoot)}`,
     `- Branch: ${knownOrUnknown(state.branch)}`,
     `- HEAD: ${knownOrUnknown(state.head)}`,
     `- Working tree: ${state.workingTree}`,
   ].join("\n");
+
+  const coordination = formatCoordinationState(fabric);
+  return coordination ? `${base}\n\n${coordination}` : base;
 }
 
 function formatCheckpointMetadata(input: CheckpointResetInput): string {
-  return [
+  const lines = [
     `- Created: ${knownOrUnknown(input.createdAt)}`,
     `- Repository: ${knownOrUnknown(input.repositoryState.repositoryRoot)}`,
     `- Working directory: ${knownOrUnknown(input.repositoryState.workingDirectory)}`,
@@ -332,7 +369,16 @@ function formatCheckpointMetadata(input: CheckpointResetInput): string {
     `- Working tree: ${input.repositoryState.workingTree}`,
     `- Parent Pi session: ${knownOrUnknown(input.parentSession)}`,
     `- Reason: ${knownOrUnknown(input.reason)}`,
-  ].join("\n");
+  ];
+  if (input.fabricState) {
+    const status = input.fabricState.active
+      ? input.fabricState.quiescent
+        ? "active (quiescent)"
+        : "active (non-quiescent)"
+      : "inactive";
+    lines.push(`- Coordination: ${status}`);
+  }
+  return lines.join("\n");
 }
 
 function extractSection(text: string, heading: string, headings: readonly string[]): string {
@@ -377,7 +423,7 @@ export function buildCapsuleDocument(
     sections[0],
     sections[1],
     "## Current Repository State",
-    formatRepositoryState(input.repositoryState),
+    formatRepositoryState(input.repositoryState, input.fabricState),
     sections[2],
     sections[3],
     "## Archived Context",
@@ -393,7 +439,7 @@ export function buildCheckpointPrompt(input: CheckpointResetInput): string {
     `Reason supplied by the user: ${knownOrUnknown(input.reason)}`,
     "",
     "## Recorded Repository Metadata",
-    formatRepositoryState(input.repositoryState),
+    formatRepositoryState(input.repositoryState, input.fabricState),
     `- Parent Pi session: ${knownOrUnknown(input.parentSession)}`,
     `- Created: ${knownOrUnknown(input.createdAt)}`,
     "",
@@ -411,7 +457,7 @@ export function buildCapsulePrompt(input: CheckpointResetInput): string {
     `Reason supplied by the user: ${knownOrUnknown(input.reason)}`,
     "",
     "## Recorded Repository Metadata",
-    formatRepositoryState(input.repositoryState),
+    formatRepositoryState(input.repositoryState, input.fabricState),
     "",
     "## Archived Checkpoint Pointer",
     input.checkpointPath,
@@ -634,6 +680,24 @@ export async function runCheckpointReset(
   } catch {
     parentSession = undefined;
   }
+
+  let fabricState: FabricStateSnapshotV1 | undefined;
+  try {
+    fabricState = await queryFabricState({
+      cwd: ctx.cwd,
+      ...(parentSession ? { sessionId: parentSession } : {}),
+    });
+  } catch {
+    fabricState = undefined;
+  }
+
+  if (fabricState?.active && !fabricState.quiescent) {
+    ctx.ui.notify(
+      "Warning: Delegated child agents are still active in safe-agent-team. Checkpoint will record current coordination snapshot.",
+      "warning",
+    );
+  }
+
   const input: CheckpointResetInput = {
     createdAt,
     ...(reason ? { reason } : {}),
@@ -641,6 +705,7 @@ export async function runCheckpointReset(
     ...(parentSession ? { parentSession } : {}),
     checkpointPath,
     conversationText,
+    ...(fabricState ? { fabricState } : {}),
   };
 
   let generated: CheckpointResetArtifacts | null;

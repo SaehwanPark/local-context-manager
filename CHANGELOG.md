@@ -2,6 +2,20 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
+## [0.4.0] - 2026-09-08
+
+This release hardens `local-context-manager` for multi-agent workflows, long-running sessions, and companion extension interoperability without introducing hard dependencies.
+
+### Added
+
+- **Embeddable Context Manager**: Exported `createEmbeddedContextManager` from `local-context-manager/embedded` so host runtimes (such as `pi-safe-agent-team`) can manage child agent sessions safely without loading extensions.
+- **Process-Local Interop Registry**: Implemented `Symbol.for("pi.extension-interop.v1")` provider registration for `local-context-manager.embedded-context.v1` and optional consumption of `safe-agent-team.fabric-state.v1`.
+- **Fabric-Aware Semantic Reset**: Automatic semantic checkpoint/reset recommendations defer while delegated child work is active/non-quiescent unless the hard context ceiling is reached.
+- **Evidence-Completeness Provenance**: Tool output reductions append an explicit non-exhaustive excerpt notice; compactions retain a bounded evidence-completeness caveat note when prior reductions occurred; recovery copies are stored with `0600` permissions.
+- **Token-Source Telemetry**: Explicitly report whether active context tokens are host-reported or character-estimated (`~` prefix in compact status).
+- **Diagnostics**: `/context-stats` and `/context-status` expose context token source, embedded provider status, fabric provider state, and reduction counts.
+- **Isolated Smoke Test Suite**: Added deterministic real-Pi matrix smoke tests running with `--no-extensions` and disposable `PI_CODING_AGENT_DIR`.
+
 ## [0.3.8] - 2026-09-07
 
 This patch rejects duplicate and retired compaction completion events.

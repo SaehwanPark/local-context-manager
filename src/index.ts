@@ -1,12 +1,8 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   DEFAULT_COMPACTION_SETTINGS,
-  findCutPoint,
-  sessionEntryToContextMessages,
   type CompactOptions,
   type CompactionResult,
   type ExtensionAPI,
@@ -43,8 +39,32 @@ import {
   appendFullOutputNotice,
   extractFullOutputPath,
   reduceToolOutput,
-  type ToolContentBlock,
+  saveRecoveryCopy,
 } from "./tool-output.js";
+import {
+  cleanBoundaryReason,
+  countCompactions,
+  estimateActiveContextTokens,
+  estimateActiveToolOutputTokens,
+  estimateToolContentTokens,
+  extendFileOperations,
+  getCompactionSlice,
+  parseTimestamp,
+} from "./session-utils.js";
+import {
+  attachEvidenceCompletenessNote,
+  EvidenceReductionTracker,
+  EVIDENCE_COMPLETENESS_NOTE,
+} from "./evidence-provenance.js";
+import {
+  createEmbeddedContextManager,
+  getInteropProvider,
+  LCM_EMBEDDED_CONTEXT_PROVIDER_NAME,
+  queryFabricState,
+  registerInteropProvider,
+  SAFE_AGENT_FABRIC_PROVIDER_NAME,
+  type FabricStateSnapshotV1,
+} from "./embedded/index.js";
 
 const EXTENSION_STATUS_KEY = "local-context-manager";
 const SEMANTIC_COMPACTION_INSTRUCTIONS =
@@ -82,159 +102,12 @@ function debugLog(config: LocalContextManagerConfig, message: string, error?: un
   }
 }
 
-function parseTimestamp(value: string): number | null {
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : null;
-}
-
-function countCompactions(entries: SessionEntry[]): { count: number; lastAt: number | null } {
-  let count = 0;
-  let lastAt: number | null = null;
-  for (const entry of entries) {
-    if (entry.type !== "compaction") {
-      continue;
-    }
-    count += 1;
-    const timestamp = parseTimestamp(entry.timestamp);
-    if (timestamp !== null && (lastAt === null || timestamp > lastAt)) {
-      lastAt = timestamp;
-    }
-  }
-  return { count, lastAt };
-}
-
-function estimateContentTokens(content: unknown): number {
-  if (typeof content === "string") {
-    return Math.ceil(content.length / 4);
-  }
-  if (!Array.isArray(content)) {
-    return 0;
-  }
-
-  let characters = 0;
-  for (const block of content) {
-    if (!block || typeof block !== "object") {
-      continue;
-    }
-    const value = block as { type?: unknown; text?: unknown; thinking?: unknown; name?: unknown; arguments?: unknown };
-    if (value.type === "text" && typeof value.text === "string") {
-      characters += value.text.length;
-    } else if (value.type === "thinking" && typeof value.thinking === "string") {
-      characters += value.thinking.length;
-    } else if (value.type === "toolCall") {
-      const name = typeof value.name === "string" ? value.name.length : 0;
-      let argumentsLength = 0;
-      try {
-        argumentsLength = JSON.stringify(value.arguments ?? {}).length;
-      } catch {
-        argumentsLength = 0;
-      }
-      characters += name + argumentsLength;
-    } else if (value.type === "image") {
-      characters += 4_800;
-    }
-  }
-  return Math.ceil(characters / 4);
-}
-
-function estimateToolContentTokens(content: ReadonlyArray<ToolContentBlock>): number {
-  return estimateContentTokens(content);
-}
-
-function estimateAgentMessageTokens(message: AgentMessage): number {
-  switch (message.role) {
-    case "user":
-    case "assistant":
-    case "toolResult":
-    case "custom":
-      return estimateContentTokens(message.content);
-    case "bashExecution": {
-      const command = typeof message.command === "string" ? message.command : "";
-      const output = typeof message.output === "string" ? message.output : "";
-      return Math.ceil((command.length + output.length) / 4);
-    }
-    case "branchSummary":
-    case "compactionSummary":
-      return typeof message.summary === "string" ? Math.ceil(message.summary.length / 4) : 0;
-    default:
-      return 0;
-  }
-}
-
-function estimateActiveContextTokens(entries: SessionEntry[]): number {
-  let tokens = 0;
-  for (const entry of entries) {
-    if (entry.type === "message") {
-      tokens += estimateAgentMessageTokens(entry.message);
-    } else if (entry.type === "compaction" || entry.type === "branch_summary") {
-      tokens += typeof entry.summary === "string" ? Math.ceil(entry.summary.length / 4) : 0;
-    } else if (entry.type === "custom_message") {
-      tokens += estimateContentTokens(entry.content);
-    }
-  }
-  return tokens;
-}
-
-function estimateActiveToolOutputTokens(entries: SessionEntry[]): number {
-  return entries.reduce((total, entry) => {
-    if (entry.type !== "message" || entry.message.role !== "toolResult") {
-      return total;
-    }
-    return total + estimateToolContentTokens(entry.message.content);
-  }, 0);
-}
-
-function cleanBoundaryReason(value: string | undefined): string | undefined {
-  const reason = value?.replace(/\s+/g, " ").trim();
-  return reason ? reason.slice(0, 240) : undefined;
-}
-
-function filePathFromToolArguments(argumentsValue: unknown): string | undefined {
-  if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue)) {
-    return undefined;
-  }
-  const argumentsRecord = argumentsValue as Record<string, unknown>;
-  for (const key of ["path", "file_path", "filePath"]) {
-    const path = argumentsRecord[key];
-    if (typeof path === "string" && path.trim()) {
-      return path.trim();
-    }
-  }
-  return undefined;
-}
-
-function extendFileOperations(messages: AgentMessage[], fileOps: FileOperations): void {
-  for (const message of messages) {
-    if (message.role !== "assistant") {
-      continue;
-    }
-    for (const block of message.content) {
-      if (block.type !== "toolCall") {
-        continue;
-      }
-      const path = filePathFromToolArguments(block.arguments);
-      if (!path) {
-        continue;
-      }
-      if (block.name === "read") {
-        fileOps.read.add(path);
-      } else if (block.name === "write") {
-        fileOps.written.add(path);
-      } else if (block.name === "edit") {
-        fileOps.edited.add(path);
-      }
-    }
-  }
-}
-
 async function getPiPathSettings(): Promise<PiPathSettings> {
   const fallback: PiPathSettings = {
     agentDir: process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"),
     configDirName: ".pi",
   };
 
-  // These helpers are not needed for the core policy. Keeping them optional lets the
-  // extension fall back to conventional paths if it is loaded by an older Pi build.
   try {
     const pi = await import("@earendil-works/pi-coding-agent");
     return {
@@ -243,17 +116,6 @@ async function getPiPathSettings(): Promise<PiPathSettings> {
     };
   } catch {
     return fallback;
-  }
-}
-
-async function saveRecoveryCopy(text: string): Promise<string | undefined> {
-  try {
-    const directory = await mkdtemp(join(tmpdir(), "pi-local-context-"));
-    const path = join(directory, "tool-output.txt");
-    await writeFile(path, text, { encoding: "utf8", mode: 0o600 });
-    return path;
-  } catch {
-    return undefined;
   }
 }
 
@@ -374,61 +236,7 @@ function formatThresholdSummary(thresholds: ContextThresholds): string {
   ].join(" · ");
 }
 
-interface CompactionSlice {
-  firstKeptEntryId: string;
-  messagesToSummarize: AgentMessage[];
-  turnPrefixMessages: AgentMessage[];
-  isSplitTurn: boolean;
-}
 
-function getCompactionSlice(entries: SessionEntry[], keepRecentTokens: number): CompactionSlice | undefined {
-  if (entries.length === 0 || entries.at(-1)?.type === "compaction") {
-    return undefined;
-  }
-
-  let previousCompactionIndex = -1;
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    if (entries[index].type === "compaction") {
-      previousCompactionIndex = index;
-      break;
-    }
-  }
-  let boundaryStart = 0;
-  if (previousCompactionIndex >= 0) {
-    const previousCompaction = entries[previousCompactionIndex];
-    if (previousCompaction.type === "compaction") {
-      const keptIndex = entries.findIndex((entry) => entry.id === previousCompaction.firstKeptEntryId);
-      boundaryStart = keptIndex >= 0 ? keptIndex : previousCompactionIndex + 1;
-    }
-  }
-
-  const cutPoint = findCutPoint(entries, boundaryStart, entries.length, keepRecentTokens);
-  const firstKeptEntry = entries[cutPoint.firstKeptEntryIndex];
-  if (!firstKeptEntry?.id) {
-    return undefined;
-  }
-  const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
-  if (historyEnd < boundaryStart) {
-    return undefined;
-  }
-  const messagesToSummarize = entries
-    .slice(boundaryStart, historyEnd)
-    .flatMap((entry) => (entry.type === "compaction" ? [] : sessionEntryToContextMessages(entry)));
-  const turnPrefixMessages = cutPoint.isSplitTurn
-    ? entries
-        .slice(cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex)
-        .flatMap((entry) => (entry.type === "compaction" ? [] : sessionEntryToContextMessages(entry)))
-    : [];
-  if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0) {
-    return undefined;
-  }
-  return {
-    firstKeptEntryId: firstKeptEntry.id,
-    messagesToSummarize,
-    turnPrefixMessages,
-    isSplitTurn: cutPoint.isSplitTurn,
-  };
-}
 
 function hasPersistedCompaction(context: ExtensionContext, compactionId: string): boolean {
   try {
@@ -465,10 +273,18 @@ function buildCompactionOptions(
   instructions: string | undefined,
   onComplete: (result: { estimatedTokensAfter?: number }) => void,
   onError: (error: Error) => void,
+  evidenceNote?: string,
 ): CompactOptions {
   const options: CompactOptions = { onComplete, onError };
+  let finalInstructions = instructions;
   if (reason === "semantic") {
-    options.customInstructions = instructions || SEMANTIC_COMPACTION_INSTRUCTIONS;
+    finalInstructions = instructions || SEMANTIC_COMPACTION_INSTRUCTIONS;
+  }
+  if (evidenceNote) {
+    finalInstructions = finalInstructions ? `${finalInstructions}\n\n${evidenceNote}` : evidenceNote;
+  }
+  if (finalInstructions) {
+    options.customInstructions = finalInstructions;
   }
   return options;
 }
@@ -478,6 +294,7 @@ async function buildCustomCompaction(
   context: ExtensionContext,
   config: LocalContextManagerConfig,
   thresholds: ContextThresholds,
+  hasEvidenceReduction = false,
 ): Promise<{ compaction: CompactionResult } | undefined> {
   const model = context.model;
   const nativeKeepRecentTokens = event.preparation.settings.keepRecentTokens;
@@ -551,6 +368,9 @@ async function buildCustomCompaction(
       debugLog(config, "native compaction returned no usable summary; using Pi's default compaction");
       return undefined;
     }
+    if (hasEvidenceReduction) {
+      result.summary = attachEvidenceCompletenessNote(result.summary);
+    }
     return { compaction: result };
   } catch (error) {
     debugLog(config, "custom compaction failed; using Pi's default compaction", error);
@@ -558,13 +378,26 @@ async function buildCustomCompaction(
   }
 }
 
+// Register LCM embedded controller factory in the process-local interop registry
+registerInteropProvider(LCM_EMBEDDED_CONTEXT_PROVIDER_NAME, {
+  version: 1,
+  createEmbeddedContextManager,
+});
+
 export default function (pi: ExtensionAPI): void {
+  registerInteropProvider(LCM_EMBEDDED_CONTEXT_PROVIDER_NAME, {
+    version: 1,
+    createEmbeddedContextManager,
+  });
+
   let config: LocalContextManagerConfig = { ...DEFAULT_CONFIG };
   let pathSettings: PiPathSettings | undefined;
   let telemetry = new ContextTelemetry();
   let gate = new CompactionGate({
     rearmTokens: getRearmTokens(config.softWarningTokens, config.compactThresholdTokens),
   });
+  const evidenceTracker = new EvidenceReductionTracker();
+  let semanticResetDeferredNotified = false;
   const warned = { value: false };
   let turnSerial = 0;
   let sessionGeneration = 0;
@@ -669,6 +502,7 @@ export default function (pi: ExtensionAPI): void {
         notifyUI(context, config, `Context compaction failed: ${error.message}`, "warning");
         updateStatus(context, config, telemetry);
       },
+      evidenceTracker.hasReducedSinceLastCompaction ? EVIDENCE_COMPLETENESS_NOTE : undefined,
     );
 
     try {
@@ -718,6 +552,8 @@ export default function (pi: ExtensionAPI): void {
     semanticReason = undefined;
     checkpointResetRequested = false;
     checkpointResetReason = undefined;
+    evidenceTracker.markCompaction();
+    semanticResetDeferredNotified = false;
 
     const paths = await getPiPathSettings();
     if (generation !== sessionGeneration) {
@@ -834,19 +670,56 @@ export default function (pi: ExtensionAPI): void {
     }
   });
 
-  pi.on("agent_settled", (_event, context) => {
+  pi.on("agent_settled", async (_event, context) => {
     const observed = observeContext(context, config, telemetry, gate);
     notifySoftWarning(context, config, telemetry, warned, observed);
 
     if (checkpointResetRequested) {
       const reason = checkpointResetReason;
-      checkpointResetRequested = false;
-      checkpointResetReason = undefined;
-      if (context.hasUI) {
-        context.ui.notify(
-          `Checkpoint reset recommended${reason ? ` (${reason})` : ""}. No session change was made; review it with /checkpoint-reset${reason ? ` ${reason}` : ""}.`,
-          "info",
-        );
+      let fabricSnapshot: FabricStateSnapshotV1 | undefined;
+      try {
+        let sessionFile: string | undefined;
+        try {
+          sessionFile = context.sessionManager.getSessionFile();
+        } catch {
+          sessionFile = undefined;
+        }
+        fabricSnapshot = await queryFabricState({
+          cwd: context.cwd,
+          ...(sessionFile ? { sessionId: sessionFile } : {}),
+        });
+      } catch {
+        fabricSnapshot = undefined;
+      }
+
+      const fabricActiveAndBusy = fabricSnapshot?.active && !fabricSnapshot.quiescent;
+      const atHardCeiling =
+        observed.tokens !== null && observed.tokens >= observed.thresholds.hardCeilingTokens;
+
+      if (fabricActiveAndBusy && !atHardCeiling) {
+        debugLog(config, "automatic semantic reset deferred: active safe-agent fabric is not quiescent");
+        if (context.hasUI && !semanticResetDeferredNotified) {
+          semanticResetDeferredNotified = true;
+          context.ui.notify(
+            "Checkpoint reset recommendation deferred: delegated child agents are still active.",
+            "info",
+          );
+        }
+      } else {
+        checkpointResetRequested = false;
+        checkpointResetReason = undefined;
+        semanticResetDeferredNotified = false;
+        if (context.hasUI) {
+          const suffix = reason ? ` (${reason})` : "";
+          const ceilingWarning =
+            atHardCeiling && fabricActiveAndBusy
+              ? " [hard ceiling reached; proceeding with fabric snapshot]"
+              : "";
+          context.ui.notify(
+            `Checkpoint reset recommended${suffix}${ceilingWarning}. No session change was made; review it with /checkpoint-reset${suffix}.`,
+            "info",
+          );
+        }
       }
     }
 
@@ -881,6 +754,7 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     rememberCompactionId(compactionId, seenCompactionIds);
+    evidenceTracker.markCompaction();
     const usage = context.getContextUsage();
     telemetry.observe(usage);
     let activeEntries: SessionEntry[] = [];
@@ -893,12 +767,14 @@ export default function (pi: ExtensionAPI): void {
     }
     const postTokens =
       usage?.tokens ?? (activeEntries.length > 0 ? estimateActiveContextTokens(activeEntries) : null);
+    const tokenSource = usage?.tokens !== null ? "reported" : "estimated";
 
     telemetry.markCompaction(
       parseTimestamp(event.compactionEntry.timestamp) ?? Date.now(),
       turnSerial,
       postTokens,
       activeToolOutputTokens,
+      tokenSource,
     );
     const thresholds = resolveThresholds(context, config, telemetry);
     gate.setRearmTokens(getRearmTokens(thresholds.softWarningTokens, thresholds.compactThresholdTokens));
@@ -962,6 +838,10 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
 
+    if (reduction.category) {
+      evidenceTracker.record(reduction.category);
+    }
+
     let content = reduction.content;
     let fullOutputPath = extractFullOutputPath(event.details, reduction.originalText);
     if (!fullOutputPath) {
@@ -997,7 +877,13 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_before_compact", async (event, context) => {
-    return buildCustomCompaction(event, context, config, resolveThresholds(context, config, telemetry));
+    return buildCustomCompaction(
+      event,
+      context,
+      config,
+      resolveThresholds(context, config, telemetry),
+      evidenceTracker.hasReducedSinceLastCompaction,
+    );
   });
 
   pi.registerTool({
@@ -1065,26 +951,64 @@ export default function (pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerCommand("context-stats", {
-    description: "Show local context telemetry",
-    handler: async (_args, context) => {
-      const observed = observeContext(context, config, telemetry, gate);
-      const snapshot = telemetry.snapshot(observed.thresholds.compactThresholdTokens);
-      const details = [
-        formatTelemetryDetails(snapshot),
-        `Context mode: ${config.contextProfile}`,
-        `Effective thresholds: ${formatThresholdSummary(observed.thresholds)}`,
-        `Soft warning: ${observed.thresholds.softWarningTokens.toLocaleString()} tokens`,
-        `Hard ceiling: ${observed.thresholds.hardCeilingTokens.toLocaleString()} tokens`,
-        `Enabled: ${config.enabled ? "yes" : "no"}`,
-        `Current reading: ${observed.tokens === null ? "unknown" : `${Math.round(observed.tokens).toLocaleString()} tokens`}`,
-      ].join("\n");
-      if (context.hasUI) {
-        context.ui.notify(details, "info");
-      } else if (config.debug) {
-        console.error(details);
+  const reportContextStats = async (_args: string, context: ExtensionCommandContext) => {
+    const observed = observeContext(context, config, telemetry, gate);
+    const snapshot = telemetry.snapshot(observed.thresholds.compactThresholdTokens);
+
+    const embeddedAvailable = getInteropProvider(LCM_EMBEDDED_CONTEXT_PROVIDER_NAME) !== undefined;
+    let fabricStatus = "unavailable";
+    const fabricProvider = getInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME);
+    if (fabricProvider) {
+      try {
+        let sessionFile: string | undefined;
+        try {
+          sessionFile = context.sessionManager.getSessionFile();
+        } catch {
+          sessionFile = undefined;
+        }
+        const snap = await queryFabricState({
+          cwd: context.cwd,
+          ...(sessionFile ? { sessionId: sessionFile } : {}),
+        });
+        fabricStatus = snap?.active ? "active" : "inactive";
+      } catch {
+        fabricStatus = "unavailable";
       }
-    },
+    }
+
+    const semanticResetStatus = checkpointResetRequested
+      ? (fabricStatus === "active" ? "deferred by active fabric" : "ready")
+      : "ready";
+
+    const details = [
+      formatTelemetryDetails(snapshot),
+      `Context source: ${snapshot.tokenSource}`,
+      `Embedded provider: ${embeddedAvailable ? "available" : "unavailable"}`,
+      `Fabric provider: ${fabricStatus}`,
+      `Semantic reset: ${semanticResetStatus}`,
+      `Reduced outputs since compaction: ${evidenceTracker.reducedSinceLastCompactionCount}`,
+      `Context mode: ${config.contextProfile}`,
+      `Effective thresholds: ${formatThresholdSummary(observed.thresholds)}`,
+      `Soft warning: ${observed.thresholds.softWarningTokens.toLocaleString()} tokens`,
+      `Hard ceiling: ${observed.thresholds.hardCeilingTokens.toLocaleString()} tokens`,
+      `Enabled: ${config.enabled ? "yes" : "no"}`,
+      `Current reading: ${observed.tokens === null ? "unknown" : `${Math.round(observed.tokens).toLocaleString()} tokens`}`,
+    ].join("\n");
+    if (context.hasUI) {
+      context.ui.notify(details, "info");
+    } else if (config.debug) {
+      console.error(details);
+    }
+  };
+
+  pi.registerCommand("context-stats", {
+    description: "Show local context telemetry and integration diagnostics",
+    handler: reportContextStats,
+  });
+
+  pi.registerCommand("context-status", {
+    description: "Show local context telemetry and integration diagnostics",
+    handler: reportContextStats,
   });
 
   pi.registerCommand("context-mode", {

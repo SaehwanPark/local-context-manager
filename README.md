@@ -39,6 +39,27 @@ The extension works with Pi's existing models and configuration. It does not ins
 
 All session-changing workflows are reviewable. The extension does not automatically reset sessions or inject archived checkpoints into later prompts.
 
+## Embedded context manager & extension interoperability
+
+`local-context-manager` also exports an embeddable API for child agent sessions or host orchestrators (such as `pi-safe-agent-team`) that run with extension discovery disabled:
+
+```ts
+import { createEmbeddedContextManager } from "local-context-manager/embedded";
+
+const manager = createEmbeddedContextManager({
+  getContextUsage: () => session.getContextUsage(),
+  getContextEntries: () => session.getContextEntries(),
+  compact: async (req) => { await session.compact(req); },
+  onStatus: (snap) => { /* update UI */ },
+  onDiagnostic: (diag) => { /* log */ },
+}, {
+  mode: "managed-child",
+  contextWindow: 128_000,
+});
+```
+
+It automatically registers with the process-local interop registry (`Symbol.for("pi.extension-interop.v1")`) under `local-context-manager.embedded-context.v1`. When running alongside companion extensions like `pi-safe-agent-team`, it consumes `safe-agent-team.fabric-state.v1` to defer automatic semantic resets while child agents are active, preserving deterministic coordination metadata in durable checkpoints.
+
 ## Development
 
 ```bash

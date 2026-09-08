@@ -1,3 +1,7 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 export interface TextContentBlock {
   type: "text";
   text: string;
@@ -10,6 +14,9 @@ export interface ImageContentBlock {
 }
 
 export type ToolContentBlock = TextContentBlock | ImageContentBlock;
+
+export const NON_EXHAUSTIVE_NOTICE =
+  "This is a non-complete excerpt. Re-open the saved full output before conclusions that depend on ordering, absence, exact counts, or exhaustive matches.";
 
 export interface ToolOutputInput {
   toolName: string;
@@ -41,9 +48,27 @@ const SOURCE_COMMAND_RE =
 const SEARCH_COMMAND_RE = /(?:^|[;&|\s])(?:rg|ripgrep|grep|git\s+grep|find)\b/i;
 const GIT_DIFF_COMMAND_RE = /(?:^|[;&|\s])git\s+(?:-[^\s]+\s+)*diff\b/i;
 const HIGH_PRIORITY_RE =
-  /\b(?:error|errors|failed|failure|exception|traceback|panic|fatal|undefined|cannot|could not|command exited|exit code)\b|(?:^|\s)(?:at\s+)?[^\s:]+:\d+(?::\d+)?/i;
+  /\b(?:error|errors|failed|failure|exception|traceback|panic|fatal|undefined|cannot|could not|command exited|exit code)\b|(?:^|\s)(?:at\s+[^\s:]+:\d+(?::\d+)?|(?![\[\d\sT:-]+:\d+)(?:[a-zA-Z0-9_.~/-]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_.~-]*\/[^\s:]+):\d+(?::\d+)?)/i;
 const MEDIUM_PRIORITY_RE =
   /\b(?:warning|warnings|warn|passed|passing|failed|skipped|tests?|suites?|summary|assert(?:ion)?s?)\b/i;
+export const LOG_STREAM_COMMAND_RE =
+  /\b(?:docker\s+logs|journalctl|kubectl\s+logs|log|trace|events|stream|concurrency)\b/i;
+export const LOG_LINE_TIMESTAMP_RE =
+  /(?:^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}|\[\d{2}:\d{2}:\d{2}\]|\b(?:trace|span)id=)/i;
+
+export function isLogOrEventStream(command?: string, lines: string[] = []): boolean {
+  if (command && LOG_STREAM_COMMAND_RE.test(command)) {
+    return true;
+  }
+  let timestampCount = 0;
+  for (let i = 0; i < Math.min(lines.length, 50); i++) {
+    if (LOG_LINE_TIMESTAMP_RE.test(lines[i])) {
+      timestampCount++;
+      if (timestampCount >= 3) return true;
+    }
+  }
+  return false;
+}
 
 function estimateTextTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -82,7 +107,11 @@ function lineScore(line: string): number {
   return 1;
 }
 
-function selectExcerpt(lines: string[], maxLines = MAX_RETAINED_OUTPUT_LINES): string[] {
+function selectExcerpt(
+  lines: string[],
+  maxLines = MAX_RETAINED_OUTPUT_LINES,
+  isLogStream = false,
+): string[] {
   if (lines.length <= maxLines) {
     return lines;
   }
@@ -121,7 +150,9 @@ function selectExcerpt(lines: string[], maxLines = MAX_RETAINED_OUTPUT_LINES): s
   for (const index of mandatory) {
     selected.add(index);
   }
-  for (const index of highPriority.flatMap((value) => [value - 1, value, value + 1])) {
+
+  const windowOffsets = isLogStream ? [-3, -2, -1, 0, 1, 2, 3] : [-1, 0, 1];
+  for (const index of highPriority.flatMap((value) => windowOffsets.map((offset) => value + offset))) {
     if (selected.size >= maxLines) {
       break;
     }
@@ -188,18 +219,20 @@ function buildExcerptText(
   isError: boolean,
 ): string {
   const lines = originalText.split("\n");
+  const command = getCommand(input);
+  const isLogStream = isLogOrEventStream(command, lines);
   const header = compactedHeader(category, originalText, input, isError);
   let body: string;
 
   if (category === "failure") {
-    const excerpt = fitExcerpt(selectExcerpt(lines));
+    const excerpt = fitExcerpt(selectExcerpt(lines, MAX_RETAINED_OUTPUT_LINES, isLogStream));
     body = excerpt ? `Key diagnostics and recent output:\n${excerpt}` : "No textual diagnostic was available.";
   } else if (category === "search") {
     const pattern = typeof input.pattern === "string" ? input.pattern : typeof input.query === "string" ? input.query : undefined;
-    const excerpt = fitExcerpt(selectExcerpt(lines));
+    const excerpt = fitExcerpt(selectExcerpt(lines, MAX_RETAINED_OUTPUT_LINES, isLogStream));
     body = [
       pattern ? `Search query: ${quote(pattern)}` : undefined,
-      `Matching lines shown: ${lines.filter((line) => line.trim()).length}`,
+      `Sampled matching lines: ${lines.filter((line) => line.trim()).length}`,
       excerpt ? `Relevant matches:\n${excerpt}` : "No matching lines were returned.",
     ]
       .filter((line): line is string => line !== undefined)
@@ -208,11 +241,11 @@ function buildExcerptText(
     body = formatDiffSummary(lines);
   } else {
     const important = lines.filter((line) => lineScore(line) >= 2);
-    const excerpt = fitExcerpt(selectExcerpt(important.length > 0 ? important : lines));
+    const excerpt = fitExcerpt(selectExcerpt(important.length > 0 ? important : lines, MAX_RETAINED_OUTPUT_LINES, isLogStream));
     body = excerpt ? `Relevant output:\n${excerpt}` : "No textual output was returned.";
   }
 
-  return `${header}\n${body}`;
+  return `${header}\n${body}\n\n${NON_EXHAUSTIVE_NOTICE}`;
 }
 
 function diffPathFromHeader(line: string): string | undefined {
@@ -400,4 +433,15 @@ export function appendFullOutputNotice(content: ReadonlyArray<ToolContentBlock>,
       text: `${block.text}\nFull output saved to: ${path}`,
     };
   });
+}
+
+export async function saveRecoveryCopy(text: string): Promise<string | undefined> {
+  try {
+    const directory = await mkdtemp(join(tmpdir(), "pi-local-context-"));
+    const path = join(directory, "tool-output.txt");
+    await writeFile(path, text, { encoding: "utf8", mode: 0o600 });
+    return path;
+  } catch {
+    return undefined;
+  }
 }

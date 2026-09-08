@@ -21,18 +21,25 @@ describe("telemetry", () => {
     expect(snapshot.lastCompactionTurn).toBe(3);
     expect(snapshot.checkpointResets).toBe(4);
     expect(snapshot.lastCheckpointPath).toBe("/tmp/checkpoint-2.md");
+    expect(snapshot.tokenSource).toBe("reported");
     expect(formatTelemetryStatus(snapshot)).toContain("ctx 11k/32k");
+    expect(formatTelemetryDetails(snapshot)).toContain("Token source: reported");
     expect(formatTelemetryDetails(snapshot)).toContain("Last checkpoint reset");
   });
 
   it("uses an estimate when provider usage is unavailable", () => {
     const telemetry = new ContextTelemetry();
     telemetry.observeEstimate(5_000, 32_000);
+    expect(telemetry.snapshot(10_000).tokenSource).toBe("estimated");
+    expect(formatTelemetryStatus(telemetry.snapshot(10_000))).toContain("ctx ~5.0k/10k");
     telemetry.observe({ tokens: null, contextWindow: 32_000 });
     expect(telemetry.snapshot(10_000).contextTokens).toBe(null);
+    expect(telemetry.snapshot(10_000).tokenSource).toBe("unknown");
 
     telemetry.observeEstimate(7_000);
     expect(telemetry.snapshot(10_000).tokensAddedSinceCompaction).toBe(2_000);
     expect(telemetry.snapshot(10_000).checkpointResets).toBe(0);
+    expect(telemetry.snapshot(10_000).tokenSource).toBe("estimated");
+    expect(formatTelemetryStatus(telemetry.snapshot(10_000))).toContain("ctx ~7.0k/10k");
   });
 });

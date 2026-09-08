@@ -1,9 +1,14 @@
+import { stat, unlink, rm } from "node:fs/promises";
+import { dirname } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   appendFullOutputNotice,
   extractFullOutputPath,
+  isLogOrEventStream,
   MAX_RETAINED_OUTPUT_CHARS,
+  NON_EXHAUSTIVE_NOTICE,
   reduceToolOutput,
+  saveRecoveryCopy,
 } from "../src/tool-output.js";
 
 function textResult(text: string, overrides: Partial<Parameters<typeof reduceToolOutput>[0]> = {}) {
@@ -26,9 +31,18 @@ describe("tool-output reduction", () => {
       input: { command: "cat src/index.ts" },
     });
     expect(source.changed).toBe(false);
+
+    // Native read tool must never be reduced even if large
+    const readTool = reduceToolOutput({
+      toolName: "read",
+      input: { path: "src/large-file.ts" },
+      content: [{ type: "text", text: "line\n".repeat(2_000) }],
+      isError: false,
+    });
+    expect(readTool.changed).toBe(false);
   });
 
-  it("reduces a large build result while retaining diagnostics and a tail", () => {
+  it("reduces a large build result while retaining diagnostics, tail, and non-exhaustive notice", () => {
     const output = [
       ...Array.from({ length: 400 }, (_, index) => `compile module ${index}`),
       "error TS2322: src/main.ts:42:7 type mismatch",
@@ -42,17 +56,19 @@ describe("tool-output reduction", () => {
     expect(reduced.retainedTokens).toBeLessThan(reduced.originalTokens);
     expect(reduced.compactedText).toContain("error TS2322");
     expect(reduced.compactedText).toContain("Tests: 12 passed");
+    expect(reduced.compactedText).toContain(NON_EXHAUSTIVE_NOTICE);
   });
 
-  it("reduces a very large unknown command conservatively as generic output", () => {
+  it("reduces a very large unknown command conservatively as generic output with non-exhaustive notice", () => {
     const reduced = textResult("ordinary output\n".repeat(2_000), {
       input: { command: "python script.py" },
     });
     expect(reduced.changed).toBe(true);
     expect(reduced.category).toBe("generic");
+    expect(reduced.compactedText).toContain(NON_EXHAUSTIVE_NOTICE);
   });
 
-  it("prioritizes diagnostics in a failed command", () => {
+  it("prioritizes diagnostics in a failed command and includes non-exhaustive notice", () => {
     const output = [
       ...Array.from({ length: 900 }, (_, index) => `trace line ${index}`),
       "Traceback: failed at app/server.py:91:4",
@@ -64,9 +80,10 @@ describe("tool-output reduction", () => {
     expect(reduced.category).toBe("failure");
     expect(reduced.compactedText).toContain("app/server.py:91:4");
     expect(reduced.compactedText).toContain("Exit status: 2");
+    expect(reduced.compactedText).toContain(NON_EXHAUSTIVE_NOTICE);
   });
 
-  it("summarizes search and diff output with query/file information", () => {
+  it("summarizes search without claiming exhaustive matches and diff with file info", () => {
     const search = reduceToolOutput({
       toolName: "grep",
       input: { pattern: "TODO" },
@@ -75,6 +92,9 @@ describe("tool-output reduction", () => {
     });
     expect(search.category).toBe("search");
     expect(search.compactedText).toContain('Search query: "TODO"');
+    // Must say "Sampled matching lines" rather than implying exhaustive matches
+    expect(search.compactedText).toContain("Sampled matching lines:");
+    expect(search.compactedText).toContain(NON_EXHAUSTIVE_NOTICE);
 
     const diffText = [
       "diff --git a/src/a.ts b/src/a.ts",
@@ -95,6 +115,7 @@ describe("tool-output reduction", () => {
     expect(diff.category).toBe("diff");
     expect(diff.compactedText).toContain("src/a.ts (+1/-1)");
     expect(diff.compactedText).toContain("Hunks:");
+    expect(diff.compactedText).toContain(NON_EXHAUSTIVE_NOTICE);
   });
 
   it("preserves image blocks and adds a recoverable full-output notice", () => {
@@ -115,4 +136,55 @@ describe("tool-output reduction", () => {
     expect(extractFullOutputPath({ fullOutputPath: "/tmp/tool-output.txt" }, "")).toBe("/tmp/tool-output.txt");
     expect(extractFullOutputPath({}, "Full output: [/tmp/fake.txt]")).toBeUndefined();
   });
+
+  it("creates recovery copies with file permissions 0600", async () => {
+    const text = "confidential diagnostic logs and tool outputs";
+    const path = await saveRecoveryCopy(text);
+    expect(path).toBeDefined();
+    if (!path) return;
+
+    try {
+      const stats = await stat(path);
+      // Mode on POSIX systems: check the permission bits (0o777 mask)
+      const mode = stats.mode & 0o777;
+      expect(mode).toBe(0o600);
+    } finally {
+      await unlink(path);
+      await rm(dirname(path), { recursive: true, force: true });
+    }
+  });
+
+  it("detects log and event streams and preserves contiguous temporal windows", () => {
+    expect(isLogOrEventStream("docker logs app")).toBe(true);
+    expect(isLogOrEventStream("journalctl -u my-service")).toBe(true);
+    expect(isLogOrEventStream("node app.js", [
+      "2026-09-08T10:00:01 worker starting",
+      "2026-09-08T10:00:02 worker connected",
+      "2026-09-08T10:00:03 worker ready",
+    ])).toBe(true);
+    expect(isLogOrEventStream("npm test", ["passed 1", "passed 2"])).toBe(false);
+
+    // Concurrency / race condition trace with timestamped logs
+    const lines = Array.from({ length: 400 }, (_, i) => {
+      if (i === 150) return `2026-09-08 10:00:${i} FATAL: race detected in lock acquisition`;
+      if (i === 149) return `2026-09-08 10:00:${i} thread 2 acquiring lock`;
+      if (i === 151) return `2026-09-08 10:00:${i} thread 1 panic on lock state`;
+      return `2026-09-08 10:00:${i} benign heartbeat`;
+    });
+
+    const reduced = reduceToolOutput({
+      toolName: "bash",
+      input: { command: "docker logs service" },
+      content: [{ type: "text", text: lines.join("\n") }],
+      isError: true,
+    });
+
+    expect(reduced.changed).toBe(true);
+    expect(reduced.compactedText).toContain("FATAL: race detected");
+    // Neighboring temporal window lines around the incident should be captured
+    expect(reduced.compactedText).toContain("thread 2 acquiring lock");
+    expect(reduced.compactedText).toContain("thread 1 panic");
+    expect(reduced.compactedText).toContain(NON_EXHAUSTIVE_NOTICE);
+  });
 });
+
