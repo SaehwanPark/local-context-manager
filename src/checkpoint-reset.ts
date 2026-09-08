@@ -16,7 +16,12 @@ import {
   limitText,
   validateStructuredOutput,
 } from "./continuation.js";
-import { queryFabricState, type FabricStateSnapshotV1 } from "./embedded/interop.js";
+import {
+  getInteropProvider,
+  queryFabricState,
+  SAFE_AGENT_FABRIC_PROVIDER_NAME,
+  type FabricStateSnapshotV1,
+} from "./embedded/interop.js";
 
 export const CHECKPOINT_RESET_ENTRY_TYPE = "local-context-manager-checkpoint-reset";
 export const MAX_CHECKPOINT_INPUT_CHARS = 120_000;
@@ -116,6 +121,7 @@ export interface CheckpointResetInput {
   checkpointPath: string;
   conversationText: string;
   fabricState?: FabricStateSnapshotV1;
+  forced?: boolean;
 }
 
 export interface CheckpointResetArtifacts {
@@ -314,7 +320,7 @@ export async function writeCheckpointAtomically(path: string, content: string): 
   }
 }
 
-export function formatCoordinationState(fabric?: FabricStateSnapshotV1): string {
+export function formatCoordinationState(fabric?: FabricStateSnapshotV1, forced = false): string {
   if (!fabric) {
     return "";
   }
@@ -327,8 +333,14 @@ export function formatCoordinationState(fabric?: FabricStateSnapshotV1): string 
     `- Mutable holds: ${fabric.mutableHolds}`,
     `- Pending root requests: ${fabric.pendingRootRequests}`,
   ];
+  if (forced) {
+    lines.push(
+      "- Reset status: FORCED during active child work; active descendants were subject to cancellation by session replacement",
+    );
+    lines.push("- Episode completion: partial (session forced before child quiescence)");
+  }
   if (fabric.timestamp) {
-    lines.push(`- Captured at: ${new Date(fabric.timestamp).toISOString()}`);
+    lines.push(`- Captured at (point-in-time): ${new Date(fabric.timestamp).toISOString()}`);
   }
   if (fabric.activeTasks && fabric.activeTasks.length > 0) {
     for (const task of fabric.activeTasks.slice(0, 10)) {
@@ -346,7 +358,7 @@ export function formatCoordinationState(fabric?: FabricStateSnapshotV1): string 
   return lines.join("\n");
 }
 
-export function formatRepositoryState(state: RepositoryState, fabric?: FabricStateSnapshotV1): string {
+export function formatRepositoryState(state: RepositoryState, fabric?: FabricStateSnapshotV1, forced = false): string {
   const base = [
     `- Working directory: ${knownOrUnknown(state.workingDirectory)}`,
     `- Repository: ${knownOrUnknown(state.repositoryRoot)}`,
@@ -355,7 +367,7 @@ export function formatRepositoryState(state: RepositoryState, fabric?: FabricSta
     `- Working tree: ${state.workingTree}`,
   ].join("\n");
 
-  const coordination = formatCoordinationState(fabric);
+  const coordination = formatCoordinationState(fabric, forced);
   return coordination ? `${base}\n\n${coordination}` : base;
 }
 
@@ -374,9 +386,19 @@ function formatCheckpointMetadata(input: CheckpointResetInput): string {
     const status = input.fabricState.active
       ? input.fabricState.quiescent
         ? "active (quiescent)"
-        : "active (non-quiescent)"
+        : input.forced
+          ? "active (non-quiescent, FORCED reset)"
+          : "active (non-quiescent)"
       : "inactive";
     lines.push(`- Coordination: ${status}`);
+    if (input.forced) {
+      lines.push("- Forced: yes (active child agents cancelled/subject to cancellation)");
+    }
+    const coordination = formatCoordinationState(input.fabricState, input.forced);
+    if (coordination) {
+      lines.push("");
+      lines.push(coordination);
+    }
   }
   return lines.join("\n");
 }
@@ -423,7 +445,7 @@ export function buildCapsuleDocument(
     sections[0],
     sections[1],
     "## Current Repository State",
-    formatRepositoryState(input.repositoryState, input.fabricState),
+    formatRepositoryState(input.repositoryState, input.fabricState, input.forced),
     sections[2],
     sections[3],
     "## Archived Context",
@@ -439,7 +461,7 @@ export function buildCheckpointPrompt(input: CheckpointResetInput): string {
     `Reason supplied by the user: ${knownOrUnknown(input.reason)}`,
     "",
     "## Recorded Repository Metadata",
-    formatRepositoryState(input.repositoryState, input.fabricState),
+    formatRepositoryState(input.repositoryState, input.fabricState, input.forced),
     `- Parent Pi session: ${knownOrUnknown(input.parentSession)}`,
     `- Created: ${knownOrUnknown(input.createdAt)}`,
     "",
@@ -457,7 +479,7 @@ export function buildCapsulePrompt(input: CheckpointResetInput): string {
     `Reason supplied by the user: ${knownOrUnknown(input.reason)}`,
     "",
     "## Recorded Repository Metadata",
-    formatRepositoryState(input.repositoryState, input.fabricState),
+    formatRepositoryState(input.repositoryState, input.fabricState, input.forced),
     "",
     "## Archived Checkpoint Pointer",
     input.checkpointPath,
@@ -615,6 +637,21 @@ export async function listCheckpointFiles(directory: string): Promise<Checkpoint
   );
 }
 
+export function parseResetArguments(input: string): { force: boolean; reason: string | undefined } {
+  const parts = input.trim().split(/\s+/).filter(Boolean);
+  let force = false;
+  const reasonParts: string[] = [];
+  for (const part of parts) {
+    if (part === "--force" || part === "-f") {
+      force = true;
+    } else {
+      reasonParts.push(part);
+    }
+  }
+  const rawReason = reasonParts.join(" ");
+  return { force, reason: cleanReason(rawReason) };
+}
+
 export async function runCheckpointReset(
   reasonArgument: string,
   ctx: ExtensionCommandContext,
@@ -642,7 +679,7 @@ export async function runCheckpointReset(
     return;
   }
 
-  const reason = cleanReason(reasonArgument);
+  const { force, reason } = parseResetArguments(reasonArgument);
   let conversationText: string;
   try {
     conversationText = getActiveConversationText(ctx);
@@ -681,23 +718,49 @@ export async function runCheckpointReset(
     parentSession = undefined;
   }
 
+  const fabricProvider = getInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME);
   let fabricState: FabricStateSnapshotV1 | undefined;
-  try {
-    fabricState = await queryFabricState({
-      cwd: ctx.cwd,
-      ...(parentSession ? { sessionId: parentSession } : {}),
-    });
-  } catch {
-    fabricState = undefined;
+  let fabricQueryFailed = false;
+  if (fabricProvider !== undefined) {
+    try {
+      fabricState = await queryFabricState({
+        cwd: ctx.cwd,
+        ...(parentSession ? { sessionId: parentSession } : {}),
+      });
+      if (!fabricState) {
+        fabricQueryFailed = true;
+      }
+    } catch {
+      fabricQueryFailed = true;
+    }
   }
 
-  if (fabricState?.active && !fabricState.quiescent) {
-    ctx.ui.notify(
-      "Warning: Delegated child agents are still active in safe-agent-team. Checkpoint will record current coordination snapshot.",
-      "warning",
+  const hasActiveChildren = Boolean(fabricState?.active && !fabricState.quiescent);
+  const isFabricUncertain = fabricProvider !== undefined && (fabricQueryFailed || !fabricState);
+
+  if (hasActiveChildren || isFabricUncertain) {
+    if (!force) {
+      const activeDesc = fabricState
+        ? `Delegated child work is active in safe-agent-team (${fabricState.runningChildren} running child(ren), ${fabricState.unresolvedChildTasks} unresolved task(s), ${fabricState.mutableHolds} hold(s))`
+        : "Safe-agent fabric is registered but state query failed or is uncertain";
+      ctx.ui.notify(
+        `Cannot reset checkpoint: ${activeDesc}. Replacing the root Pi session would cancel in-flight children. Wait for children to complete or re-run with /checkpoint-reset --force.`,
+        "error",
+      );
+      return;
+    }
+
+    const confirmed = await ctx.ui.confirm(
+      "Warning: Active child agents detected",
+      "Continuing will replace the root Pi session and cancel active managed children. Are you sure you want to proceed?",
     );
+    if (!confirmed) {
+      ctx.ui.notify("Checkpoint reset cancelled; active children and context preserved.", "info");
+      return;
+    }
   }
 
+  const isForcedReset = Boolean(force && (hasActiveChildren || isFabricUncertain));
   const input: CheckpointResetInput = {
     createdAt,
     ...(reason ? { reason } : {}),
@@ -706,6 +769,7 @@ export async function runCheckpointReset(
     checkpointPath,
     conversationText,
     ...(fabricState ? { fabricState } : {}),
+    ...(isForcedReset ? { forced: true } : {}),
   };
 
   let generated: CheckpointResetArtifacts | null;

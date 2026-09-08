@@ -1,14 +1,16 @@
-import { stat, unlink, rm } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   appendFullOutputNotice,
+  cleanupRecoveryStorage,
   extractFullOutputPath,
   isLogOrEventStream,
   MAX_RETAINED_OUTPUT_CHARS,
   NON_EXHAUSTIVE_NOTICE,
   reduceToolOutput,
   saveRecoveryCopy,
+  SessionRecoveryStorage,
 } from "../src/tool-output.js";
 
 function textResult(text: string, overrides: Partial<Parameters<typeof reduceToolOutput>[0]> = {}) {
@@ -137,21 +139,49 @@ describe("tool-output reduction", () => {
     expect(extractFullOutputPath({}, "Full output: [/tmp/fake.txt]")).toBeUndefined();
   });
 
-  it("creates recovery copies with file permissions 0600", async () => {
+  it("creates recovery copies with file permissions 0600 and directory 0700", async () => {
     const text = "confidential diagnostic logs and tool outputs";
-    const path = await saveRecoveryCopy(text);
+    const path = await saveRecoveryCopy(text, "test-tool");
     expect(path).toBeDefined();
     if (!path) return;
 
     try {
       const stats = await stat(path);
-      // Mode on POSIX systems: check the permission bits (0o777 mask)
       const mode = stats.mode & 0o777;
       expect(mode).toBe(0o600);
+
+      const dirStats = await stat(dirname(path));
+      const dirMode = dirStats.mode & 0o777;
+      expect(dirMode).toBe(0o700);
     } finally {
-      await unlink(path);
-      await rm(dirname(path), { recursive: true, force: true });
+      await cleanupRecoveryStorage();
     }
+  });
+
+  it("bounds recovery storage by file count and bytes, and cleans up completely", async () => {
+    const storage = new SessionRecoveryStorage({ maxFiles: 3, maxBytes: 10_000 });
+    const p1 = await storage.save("file 1 content", "bash");
+    await storage.save("file 2 content", "bash");
+    await storage.save("file 3 content", "bash");
+    expect(storage.activeFilesCount).toBe(3);
+
+    // Saving a 4th file should prune the oldest (p1)
+    const p4 = await storage.save("file 4 content", "bash");
+    expect(storage.activeFilesCount).toBe(3);
+    if (p1) {
+      const p1Exists = await stat(p1).then(() => true).catch(() => false);
+      expect(p1Exists).toBe(false);
+    }
+    if (p4) {
+      const p4Exists = await stat(p4).then(() => true).catch(() => false);
+      expect(p4Exists).toBe(true);
+    }
+
+    const dir = await storage.getDirectory();
+    expect(await stat(dir).then(() => true).catch(() => false)).toBe(true);
+    await storage.cleanup();
+    expect(await stat(dir).then(() => true).catch(() => false)).toBe(false);
+    expect(storage.activeFilesCount).toBe(0);
   });
 
   it("detects log and event streams and preserves contiguous temporal windows", () => {

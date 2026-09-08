@@ -1,8 +1,27 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
+
+vi.mock("@earendil-works/pi-coding-agent", async () => {
+  const actual = await vi.importActual<typeof import("@earendil-works/pi-coding-agent")>(
+    "@earendil-works/pi-coding-agent",
+  );
+  class TestLoader {
+    readonly signal = new AbortController().signal;
+    onAbort: (() => void) | undefined;
+    constructor(_tui: unknown, _theme: unknown, _message: string) {}
+    dispose(): void {}
+  }
+  return { ...actual, BorderedLoader: TestLoader };
+});
+
 import {
   formatCoordinationState,
   formatRepositoryState,
+  getCheckpointStorageDirectory,
+  listCheckpointFiles,
   runCheckpointReset,
   type RepositoryState,
 } from "../src/checkpoint-reset.js";
@@ -14,6 +33,44 @@ import {
   SAFE_AGENT_FABRIC_PROVIDER_NAME,
 } from "../src/embedded/interop.js";
 import extension from "../src/index.js";
+
+function flushImmediate(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function compactionHistory(contentChars = 32_000): SessionEntry[] {
+  const content = [{ type: "text" as const, text: "x".repeat(contentChars) }];
+  return [
+    {
+      type: "message",
+      id: "user-1",
+      parentId: null,
+      timestamp: new Date(1).toISOString(),
+      message: { role: "user", content, timestamp: 1 },
+    },
+    {
+      type: "message",
+      id: "assistant-1",
+      parentId: "user-1",
+      timestamp: new Date(2).toISOString(),
+      message: { role: "assistant", content, timestamp: 2 },
+    },
+    {
+      type: "message",
+      id: "user-2",
+      parentId: "assistant-1",
+      timestamp: new Date(3).toISOString(),
+      message: { role: "user", content, timestamp: 3 },
+    },
+    {
+      type: "message",
+      id: "assistant-2",
+      parentId: "user-2",
+      timestamp: new Date(4).toISOString(),
+      message: { role: "assistant", content, timestamp: 4 },
+    },
+  ] as SessionEntry[];
+}
 
 type Handler = (event: unknown, context: unknown) => unknown;
 
@@ -53,7 +110,9 @@ function makeContext(tokens: number | null, contextWindow = 64_000, entries: Ses
       percent: tokens ? (tokens / contextWindow) * 100 : 0,
     }),
     isIdle: () => true,
-    compact: vi.fn(),
+    compact: vi.fn((options: any) => {
+      options?.onComplete?.({ estimatedTokensAfter: 8_000 });
+    }),
     sessionManager: {
       buildContextEntries: () => entries,
       getBranch: () => entries,
@@ -244,8 +303,29 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
     );
   });
 
-  // Scenario E: User explicitly requests reset during child activity
-  it("Scenario E: user explicitly requests reset during child activity - warns and persists coordination state", async () => {
+  const checkpointSections = [
+    "## Goals\n- Keep the cache prefix stable.",
+    "## Standing Constraints\n- Use TypeScript and Node built-ins.",
+    "## Decisions and Rationale\n- Keep archive files outside the repository.",
+    "## Work Completed\n- Added the reset flow.",
+    "## Relevant Files\n- src/index.ts\n- src/checkpoint-reset.ts",
+    "## Verification\n- npm test passed.",
+    "## Problems Encountered\n- unknown",
+    "## Rejected Approaches\n- Do not use automatic retrieval.",
+    "## Unresolved Issues\n- The next feature is not selected.",
+    "## Follow-ups\n- Continue the same project.",
+    "## Historical Notes\n- The detailed episode remains in the parent session.",
+  ].join("\n\n");
+
+  const capsuleSections = [
+    "## Active Goals\n- Continue maintaining the project.",
+    "## Standing Constraints\n- Keep the active capsule small.",
+    "## Durable Decisions\n- Historical details stay on disk.",
+    "## Outstanding Work\n- Verify the next requested change.",
+  ].join("\n\n");
+
+  // Scenario E: User explicitly requests reset during child activity without --force
+  it("Scenario E: user explicitly requests reset during child activity without --force - refuses reset with error and does not touch session", async () => {
     const fabricSnapshot: FabricStateSnapshotV1 = {
       active: true,
       quiescent: false,
@@ -276,21 +356,27 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
       workingTree: "clean",
     };
 
-    // 1. Verify formatCoordinationState and formatRepositoryState output
-    const formattedCoord = formatCoordinationState(fabricSnapshot);
+    // 1. Verify formatCoordinationState output (normal vs forced)
+    const formattedCoord = formatCoordinationState(fabricSnapshot, false);
     expect(formattedCoord).toContain("### Coordination State");
     expect(formattedCoord).toContain("- Fabric: active");
     expect(formattedCoord).toContain("- Quiescent: no");
     expect(formattedCoord).toContain("- Running children: 2");
     expect(formattedCoord).toContain("- Active task T-12 [active], owner agent-4");
     expect(formattedCoord).toContain("- Mutable resource src/parser src/parser.ts, holder agent-4");
+    expect(formattedCoord).not.toContain("FORCED during active child work");
+
+    const formattedForced = formatCoordinationState(fabricSnapshot, true);
+    expect(formattedForced).toContain("FORCED during active child work");
+    expect(formattedForced).toContain("Episode completion: partial");
 
     const formattedRepo = formatRepositoryState(repoState, fabricSnapshot);
     expect(formattedRepo).toContain("Working directory: /work/project");
     expect(formattedRepo).toContain("### Coordination State");
 
-    // 2. Verify runCheckpointReset warns about active delegated children
+    // 2. Verify runCheckpointReset refuses reset without --force
     const notifications: Array<{ message: string; type: string }> = [];
+    const newSession = vi.fn();
     const fakeCtx = {
       mode: "tui" as const,
       cwd: "/work/project",
@@ -319,8 +405,9 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
         notify: (msg: string, type: string) => {
           notifications.push({ message: msg, type });
         },
-        custom: vi.fn().mockResolvedValue(null), // simulate aborted/cancelled generation
+        confirm: vi.fn().mockResolvedValue(true),
       },
+      newSession,
     };
 
     await runCheckpointReset("Manual reset", fakeCtx as any, {
@@ -332,9 +419,303 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
 
     expect(notifications).toContainEqual(
       expect.objectContaining({
-        message: expect.stringContaining("Warning: Delegated child agents are still active"),
-        type: "warning",
+        message: expect.stringContaining("Cannot reset checkpoint: Delegated child work is active in safe-agent-team"),
+        type: "error",
       }),
     );
+    expect(newSession).not.toHaveBeenCalled();
+  });
+
+  // Scenario E2: User explicitly requests reset with --force during child activity
+  it("Scenario E2: user explicitly requests reset with --force during child activity - prompts confirm and proceeds with forced snapshot", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "lcm-test-force-reset-"));
+    try {
+      const fabricSnapshot: FabricStateSnapshotV1 = {
+        active: true,
+        quiescent: false,
+        runningChildren: 2,
+        unresolvedChildTasks: 1,
+        mutableHolds: 0,
+        pendingRootRequests: 0,
+        pendingRootDeliveries: 0,
+        activeTasks: [{ id: "T-1", status: "running", owner: "child-worker" }],
+        timestamp: Date.now(),
+      };
+
+      registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
+        getSnapshot: vi.fn().mockResolvedValue(fabricSnapshot),
+      });
+
+      const responses = [checkpointSections, capsuleSections];
+      const notifications: Array<{ message: string; type: string }> = [];
+      const confirms: Array<{ title: string; message: string }> = [];
+      const newSession = vi.fn().mockResolvedValue(undefined);
+
+      const fakeCtx = {
+        mode: "tui" as const,
+        cwd: tempDir,
+        model: { id: "test-model", maxTokens: 16_384 },
+        modelRegistry: {
+          hasConfiguredAuth: () => true,
+          complete: vi.fn(async () => ({
+            stopReason: "stop",
+            content: [{ type: "text", text: responses.shift() ?? "" }],
+          })),
+        },
+        waitForIdle: vi.fn().mockResolvedValue(undefined),
+        sessionManager: {
+          getBranch: () => [],
+          getSessionFile: () => join(tempDir, "session.jsonl"),
+          buildContextEntries: () => [
+            {
+              type: "message",
+              id: "m1",
+              parentId: null,
+              timestamp: new Date().toISOString(),
+              message: {
+                role: "user",
+                content: [{ type: "text", text: "Implement work with subagent" }],
+              },
+            },
+          ],
+        },
+        ui: {
+          notify: (msg: string, type: string) => {
+            notifications.push({ message: msg, type });
+          },
+          confirm: vi.fn(async (title: string, message: string) => {
+            confirms.push({ title, message });
+            return true;
+          }),
+          custom: vi.fn(async (factory: any) => {
+            return new Promise<unknown>((resolve) => {
+              factory(undefined, { fg: (_n: string, t: string) => t }, {}, resolve);
+            });
+          }),
+          editor: vi.fn(async (_title: string, prefill?: string) => prefill),
+        },
+        newSession,
+      };
+
+      await runCheckpointReset("--force manual override", fakeCtx as any, {
+        config: { ...DEFAULT_CONFIG, checkpointDirectory: tempDir },
+        agentDir: tempDir,
+        runCommand: vi.fn(async (_cmd, args) => {
+          const key = args.join(" ");
+          if (key.includes("rev-parse --show-toplevel")) return { stdout: tempDir, stderr: "", code: 0 };
+          if (key.includes("rev-parse --abbrev-ref HEAD")) return { stdout: "main", stderr: "", code: 0 };
+          if (key.includes("rev-parse HEAD")) return { stdout: "abcdef123", stderr: "", code: 0 };
+          if (key.includes("status --porcelain")) return { stdout: "", stderr: "", code: 0 };
+          return { stdout: "", stderr: "", code: 0 };
+        }),
+        previousResetCount: 0,
+      });
+
+      expect(confirms).toContainEqual(
+        expect.objectContaining({
+          title: "Warning: Active child agents detected",
+        }),
+      );
+      expect(newSession).toHaveBeenCalledTimes(1);
+
+      const storage = getCheckpointStorageDirectory(
+        { ...DEFAULT_CONFIG, checkpointDirectory: tempDir },
+        tempDir,
+        tempDir,
+        { workingDirectory: tempDir, repositoryRoot: tempDir, branch: "main", head: "abcdef123", workingTree: "clean" },
+      );
+      const files = await listCheckpointFiles(storage);
+      expect(files.length).toBe(1);
+      const content = await readFile(files[0].path, "utf8");
+      expect(content).toContain("FORCED during active child work");
+      expect(content).toContain("Forced: yes");
+      expect(content).toContain("Episode completion: partial");
+
+      const sessionOptions = newSession.mock.calls[0]?.[0];
+      const fakeReplacementCtx = { ui: { setEditorText: vi.fn(), notify: vi.fn() } };
+      await sessionOptions?.withSession(fakeReplacementCtx);
+      expect(fakeReplacementCtx.ui.setEditorText).toHaveBeenCalledWith(
+        expect.stringContaining("FORCED during active child work"),
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // Scenario E3: User requests reset with --force during child activity but declines confirm
+  it("Scenario E3: user requests reset with --force during child activity but declines confirm - aborts reset", async () => {
+    const fabricSnapshot: FabricStateSnapshotV1 = {
+      active: true,
+      quiescent: false,
+      runningChildren: 1,
+      unresolvedChildTasks: 1,
+      mutableHolds: 0,
+      pendingRootRequests: 0,
+      pendingRootDeliveries: 0,
+    };
+
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
+      getSnapshot: vi.fn().mockResolvedValue(fabricSnapshot),
+    });
+
+    const notifications: Array<{ message: string; type: string }> = [];
+    const newSession = vi.fn();
+    const fakeCtx = {
+      mode: "tui" as const,
+      cwd: "/work/project",
+      model: { id: "test-model" },
+      modelRegistry: { hasConfiguredAuth: () => true },
+      waitForIdle: vi.fn().mockResolvedValue(undefined),
+      sessionManager: {
+        getBranch: () => [],
+        getSessionFile: () => "/work/project/session.jsonl",
+        buildContextEntries: () => [
+          {
+            type: "message",
+            id: "m1",
+            parentId: null,
+            timestamp: new Date().toISOString(),
+            message: {
+              role: "user",
+              content: [{ type: "text", text: "Please implement feature X and coordinate child agents." }],
+            },
+          },
+        ],
+      },
+      ui: {
+        notify: (msg: string, type: string) => {
+          notifications.push({ message: msg, type });
+        },
+        confirm: vi.fn().mockResolvedValue(false),
+      },
+      newSession,
+    };
+
+    await runCheckpointReset("-f force attempt", fakeCtx as any, {
+      config: DEFAULT_CONFIG,
+      agentDir: "/tmp/agent-dir",
+      runCommand: vi.fn(),
+      previousResetCount: 0,
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        message: expect.stringContaining("Checkpoint reset cancelled; active children and context preserved."),
+        type: "info",
+      }),
+    );
+    expect(newSession).not.toHaveBeenCalled();
+  });
+
+  // Scenario E4: Fabric provider throws or is uncertain
+  it("Scenario E4: fabric provider throws while registered - fails closed without --force", async () => {
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
+      getSnapshot: vi.fn().mockRejectedValue(new Error("Broker unreachable")),
+    });
+
+    const notifications: Array<{ message: string; type: string }> = [];
+    const newSession = vi.fn();
+    const fakeCtx = {
+      mode: "tui" as const,
+      cwd: "/work/project",
+      model: { id: "test-model" },
+      modelRegistry: { hasConfiguredAuth: () => true },
+      waitForIdle: vi.fn().mockResolvedValue(undefined),
+      sessionManager: {
+        getBranch: () => [],
+        getSessionFile: () => "/work/project/session.jsonl",
+        buildContextEntries: () => [
+          {
+            type: "message",
+            id: "m1",
+            parentId: null,
+            timestamp: new Date().toISOString(),
+            message: {
+              role: "user",
+              content: [{ type: "text", text: "Please implement feature X and coordinate child agents." }],
+            },
+          },
+        ],
+      },
+      ui: {
+        notify: (msg: string, type: string) => {
+          notifications.push({ message: msg, type });
+        },
+        confirm: vi.fn().mockResolvedValue(true),
+      },
+      newSession,
+    };
+
+    await runCheckpointReset("attempt reset", fakeCtx as any, {
+      config: DEFAULT_CONFIG,
+      agentDir: "/tmp/agent-dir",
+      runCommand: vi.fn(),
+      previousResetCount: 0,
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        message: expect.stringContaining("Safe-agent fabric is registered but state query failed or is uncertain"),
+        type: "error",
+      }),
+    );
+    expect(newSession).not.toHaveBeenCalled();
+  });
+
+  // Scenario F: Semantic compaction deferral
+  it("Scenario F: defers semantic compaction when fabric is active and non-quiescent, keeping threshold compaction independent", async () => {
+    const harness = makeExtensionHarness();
+    let isQuiescent = false;
+
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
+      getSnapshot: vi.fn().mockImplementation(() => ({
+        active: true,
+        quiescent: isQuiescent,
+        runningChildren: 1,
+        unresolvedChildTasks: 1,
+        mutableHolds: 0,
+        pendingRootRequests: 0,
+        pendingRootDeliveries: 0,
+      })),
+    });
+
+    // Sub-case 1: Context tokens below threshold, semantic compaction requested
+    // Expect: semantic compaction deferred, context.compact NOT called
+    const context1 = makeContext(10_000, 64_000, compactionHistory());
+    const sessionStart = harness.handlers.get("session_start")?.[0];
+    await sessionStart?.({}, context1);
+
+    const compactionTool = harness.tools.find((t) => t.name === "request_context_compaction");
+    await (compactionTool?.execute as any)("call-1", { reason: "Refactored module A" });
+
+    const agentSettled = harness.handlers.get("agent_settled")?.[0];
+    await agentSettled?.({}, context1);
+    await flushImmediate();
+
+    expect(context1.notifications).toContainEqual(
+      expect.objectContaining({
+        message: expect.stringContaining("Semantic compaction deferred: delegated child agents are still active."),
+        type: "info",
+      }),
+    );
+    expect(context1.compact).not.toHaveBeenCalled();
+
+    // Sub-case 2: Context tokens EXCEED threshold while fabric is still non-quiescent
+    // Expect: threshold compaction proceeds independently!
+    const context2 = makeContext(60_000, 64_000, compactionHistory());
+    await agentSettled?.({}, context2);
+    await flushImmediate();
+    expect(context2.compact).toHaveBeenCalled();
+
+    // Sub-case 3: Fabric becomes quiescent -> semantic compaction executes at next settled boundary
+    isQuiescent = true;
+    const turnStart = harness.handlers.get("turn_start")?.[0];
+    await turnStart?.({}, context2);
+    await turnStart?.({}, context2);
+
+    const context3 = makeContext(10_000, 64_000, compactionHistory());
+    await agentSettled?.({}, context3);
+    await flushImmediate();
+    expect(context3.compact).toHaveBeenCalled();
   });
 });

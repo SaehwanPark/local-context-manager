@@ -1,6 +1,6 @@
 {
   "name": "local-context-manager",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "A Pi extension for cache-friendly context control in long-running local-LLM workflows",
   "type": "module",
   "keywords": ["pi-package", "pi-extension", "local-llm", "context-management"],
@@ -41,6 +41,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "smoke": "vitest run test/smoke-isolated-pi.test.ts",
     "check": "npm run typecheck && npm test",
     "prepublishOnly": "npm run check"
   },

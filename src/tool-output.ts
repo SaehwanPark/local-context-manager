@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -435,13 +435,97 @@ export function appendFullOutputNotice(content: ReadonlyArray<ToolContentBlock>,
   });
 }
 
-export async function saveRecoveryCopy(text: string): Promise<string | undefined> {
-  try {
-    const directory = await mkdtemp(join(tmpdir(), "pi-local-context-"));
-    const path = join(directory, "tool-output.txt");
-    await writeFile(path, text, { encoding: "utf8", mode: 0o600 });
-    return path;
-  } catch {
-    return undefined;
+export interface RecoveryStorageOptions {
+  maxFiles?: number;
+  maxBytes?: number;
+}
+
+export class SessionRecoveryStorage {
+  private directory: string | null = null;
+  private readonly managedFiles: Array<{ path: string; size: number }> = [];
+  private readonly maxFiles: number;
+  private readonly maxBytes: number;
+  private fileSeq = 0;
+
+  constructor(options: RecoveryStorageOptions = {}) {
+    this.maxFiles = options.maxFiles ?? 50;
+    this.maxBytes = options.maxBytes ?? 50 * 1024 * 1024; // 50MB
   }
+
+  async getDirectory(): Promise<string> {
+    if (this.directory) {
+      const exists = await stat(this.directory).then(() => true).catch(() => false);
+      if (!exists) {
+        this.directory = null;
+      }
+    }
+    if (!this.directory) {
+      this.directory = await mkdtemp(join(tmpdir(), "pi-lcm-recovery-"));
+      await chmod(this.directory, 0o700).catch(() => undefined);
+    }
+    return this.directory;
+  }
+
+  async save(text: string, toolHint = "tool"): Promise<string | undefined> {
+    try {
+      const dir = await this.getDirectory();
+      this.fileSeq++;
+      const safeTool = toolHint.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 32);
+      const filename = `output-${this.fileSeq}-${safeTool}.txt`;
+      const path = join(dir, filename);
+      const buffer = Buffer.from(text, "utf8");
+      await writeFile(path, buffer, { encoding: "utf8", mode: 0o600 });
+      this.managedFiles.push({ path, size: buffer.length });
+      await this.prune();
+      return path;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async prune(): Promise<void> {
+    let totalBytes = this.managedFiles.reduce((sum, f) => sum + f.size, 0);
+    while (
+      (this.managedFiles.length > this.maxFiles || totalBytes > this.maxBytes) &&
+      this.managedFiles.length > 1
+    ) {
+      const oldest = this.managedFiles.shift();
+      if (oldest) {
+        totalBytes -= oldest.size;
+        await rm(oldest.path, { force: true }).catch(() => undefined);
+      }
+    }
+  }
+
+  async cleanup(): Promise<void> {
+    if (this.directory) {
+      const dir = this.directory;
+      this.directory = null;
+      this.managedFiles.length = 0;
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  get activeFilesCount(): number {
+    return this.managedFiles.length;
+  }
+}
+
+let activeRecoveryStorage = new SessionRecoveryStorage();
+
+export function getSessionRecoveryStorage(): SessionRecoveryStorage {
+  return activeRecoveryStorage;
+}
+
+export function resetSessionRecoveryStorage(): SessionRecoveryStorage {
+  activeRecoveryStorage = new SessionRecoveryStorage();
+  return activeRecoveryStorage;
+}
+
+export async function cleanupRecoveryStorage(): Promise<void> {
+  await activeRecoveryStorage.cleanup();
+}
+
+export async function saveRecoveryCopy(text: string, toolHint?: string): Promise<string | undefined> {
+  return activeRecoveryStorage.save(text, toolHint);
 }

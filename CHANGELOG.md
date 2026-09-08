@@ -2,6 +2,20 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
+## [0.4.1] - 2026-09-08
+
+This release addresses cross-project audit feedback to ensure safe coordination with `pi-safe-agent-team` and upstream Pi SDK contracts.
+
+### Added
+
+- **Cross-Project Reset Protection**: `/checkpoint-reset` now verifies `safe-agent-team.fabric-state.v1` and refuses normal reset if delegated child work is active or fabric state is uncertain. To override, users must pass `/checkpoint-reset --force` (or `-f`) and confirm via an explicit UI dialog warning that replacing the root session cancels active descendants.
+- **Forced Coordination Snapshot**: When forced, durable checkpoints and continuation capsules record explicit coordination state with partial-completion notices, point-in-time timestamps, and active child tasks.
+- **Fabric-Aware Semantic Compaction**: Semantic compaction requests (`semanticRequested` via `/compact-phase` or `request_context_compaction`) defer while child work is active or uncertain. Threshold compaction remains independent to protect root context safety.
+- **Precise Token-Source Telemetry**: Replaced generic labels with `"pi-estimate"` (from Pi's `getContextUsage()`) and `"local-fallback"` (from character-based estimation). Formatted status uses `~` prefix for local fallback.
+- **Bounded Session Recovery Storage**: Replaced unbounded temporary directories with a session-scoped `SessionRecoveryStorage` enforcing `0700` directory and `0600` file permissions, bounded file and byte quotas (50 files / 50 MB), and automated cleanup on clean session shutdown.
+- **Pi SDK Alignment**: Aligned `EmbeddedCompactionRequest` and `EmbeddedContextSnapshot` with upstream Pi SDK signatures, adding `tokens` and `thresholdRatio` interop aliases.
+- **Multi-OS CI**: Added `macos-latest` to GitHub Actions workflow matrix alongside `ubuntu-latest`.
+
 ## [0.4.0] - 2026-09-08
 
 This release hardens `local-context-manager` for multi-agent workflows, long-running sessions, and companion extension interoperability without introducing hard dependencies.
