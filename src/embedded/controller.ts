@@ -35,7 +35,7 @@ export class EmbeddedContextController implements EmbeddedContextManager {
 
   private currentTokens: number | null = null;
   private currentContextWindow: number | null = null;
-  private currentTokenSource: "reported" | "estimated" | "unknown" = "unknown";
+  private currentTokenSource: EmbeddedContextSnapshot["tokenSource"] = "unknown";
   private turnSerial = 0;
   private compactionsCount = 0;
   private disposed = false;
@@ -89,13 +89,13 @@ export class EmbeddedContextController implements EmbeddedContextManager {
     if (usage && usage.tokens !== null && Number.isFinite(usage.tokens) && usage.tokens >= 0) {
       this.currentTokens = usage.tokens;
       this.currentContextWindow = usage.contextWindow;
-      this.currentTokenSource = usage.source;
+      this.currentTokenSource = usage.source ?? "pi-estimate";
     } else {
       try {
         const entries = this.host.getContextEntries();
         this.currentTokens = estimateActiveContextTokens(entries);
         this.currentContextWindow = usage?.contextWindow ?? null;
-        this.currentTokenSource = "estimated";
+        this.currentTokenSource = "local-fallback";
       } catch (error) {
         this.currentTokens = null;
         this.currentTokenSource = "unknown";
@@ -206,7 +206,7 @@ export class EmbeddedContextController implements EmbeddedContextManager {
     let fullOutputPath = extractFullOutputPath(result.details, reduction.originalText);
     if (!fullOutputPath) {
       try {
-        fullOutputPath = await saveRecoveryCopy(reduction.originalText);
+        fullOutputPath = await saveRecoveryCopy(reduction.originalText, result.toolName);
       } catch (error) {
         this.host.onDiagnostic?.({
           level: "warning",
@@ -250,11 +250,13 @@ export class EmbeddedContextController implements EmbeddedContextManager {
         : null;
 
     return {
+      tokens: this.currentTokens,
       contextTokens: this.currentTokens,
       contextWindow: this.currentContextWindow,
       tokenSource: this.currentTokenSource,
       compactThresholdTokens: thresholds.compactThresholdTokens,
       percentOfThreshold,
+      thresholdRatio: percentOfThreshold !== null ? percentOfThreshold / 100 : undefined,
       mode: this.mode,
       enabled: this.config.enabled,
       toolOutputsReduced: this.evidenceTracker.totalReducedCount,

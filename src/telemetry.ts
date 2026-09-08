@@ -3,7 +3,12 @@ export interface ContextUsageLike {
   contextWindow: number;
 }
 
-export type ContextTokenSource = "reported" | "estimated" | "unknown";
+export type ContextTokenSource =
+  | "pi-estimate"
+  | "local-fallback"
+  | "reported"
+  | "estimated"
+  | "unknown";
 
 export interface TelemetrySnapshot {
   contextTokens: number | null;
@@ -70,7 +75,7 @@ export class ContextTelemetry {
     }
 
     this.setObservedTokens(usage.tokens);
-    this.tokenSource = "reported";
+    this.tokenSource = "pi-estimate";
   }
 
   observeEstimate(tokens: number, contextWindow?: number): void {
@@ -82,7 +87,7 @@ export class ContextTelemetry {
       return;
     }
     this.setObservedTokens(tokens);
-    this.tokenSource = "estimated";
+    this.tokenSource = "local-fallback";
   }
 
   private setObservedTokens(tokens: number): void {
@@ -198,9 +203,25 @@ export function formatTokenCount(tokens: number | null): string {
   return `${Math.round(tokens / 1_000)}k`;
 }
 
+export function formatTokenSourceDescription(source: ContextTokenSource): string {
+  switch (source) {
+    case "pi-estimate":
+    case "reported":
+      return "Pi estimate";
+    case "local-fallback":
+    case "estimated":
+      return "local fallback estimate";
+    default:
+      return "unknown";
+  }
+}
+
 export function formatTelemetryStatus(snapshot: TelemetrySnapshot): string {
   const tokenFormatted = formatTokenCount(snapshot.contextTokens);
-  const context = snapshot.tokenSource === "estimated" && snapshot.contextTokens !== null ? `~${tokenFormatted}` : tokenFormatted;
+  const isEstimate =
+    (snapshot.tokenSource === "local-fallback" || snapshot.tokenSource === "estimated") &&
+    snapshot.contextTokens !== null;
+  const context = isEstimate ? `~${tokenFormatted}` : tokenFormatted;
   const threshold = formatTokenCount(snapshot.compactThresholdTokens);
   const percent = snapshot.percentOfThreshold === null ? "?" : `${Math.round(snapshot.percentOfThreshold)}%`;
   const added = formatTokenCount(snapshot.tokensAddedSinceCompaction);
@@ -210,10 +231,11 @@ export function formatTelemetryStatus(snapshot: TelemetrySnapshot): string {
 
 export function formatTelemetryDetails(snapshot: TelemetrySnapshot): string {
   const tokenFormatted = formatTokenCount(snapshot.contextTokens);
-  const sourceLabel = snapshot.tokenSource !== "unknown" ? ` (${snapshot.tokenSource})` : "";
+  const sourceDescription = formatTokenSourceDescription(snapshot.tokenSource);
+  const sourceLabel = snapshot.tokenSource !== "unknown" ? ` (${sourceDescription})` : "";
   const lines = [
     `Context: ${tokenFormatted} tokens${sourceLabel}`,
-    `Token source: ${snapshot.tokenSource}`,
+    `Token source: ${sourceDescription}`,
     `Context window: ${formatTokenCount(snapshot.contextWindow)}`,
     `Compact threshold: ${formatTokenCount(snapshot.compactThresholdTokens)} tokens`,
     `Threshold consumed: ${snapshot.percentOfThreshold === null ? "unknown" : `${snapshot.percentOfThreshold.toFixed(1)}%`}`,

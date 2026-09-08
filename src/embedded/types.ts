@@ -2,7 +2,11 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { LocalContextManagerConfig } from "../config.js";
 import type { ToolContentBlock } from "../tool-output.js";
 
-export type EmbeddedContextUsageSource = "reported" | "estimated";
+export type EmbeddedContextUsageSource =
+  | "pi-estimate"
+  | "local-fallback"
+  | "reported"
+  | "estimated";
 
 export interface EmbeddedContextUsage {
   tokens: number | null;
@@ -11,16 +15,19 @@ export interface EmbeddedContextUsage {
 }
 
 export interface EmbeddedCompactionRequest {
-  reason: "threshold" | "semantic";
+  reason?: "threshold" | "semantic" | string;
   customInstructions?: string;
+  targetTokens?: number;
 }
 
 export interface EmbeddedContextSnapshot {
+  tokens?: number | null;
   contextTokens: number | null;
   contextWindow: number | null;
-  tokenSource: "reported" | "estimated" | "unknown";
+  tokenSource: "pi-estimate" | "local-fallback" | "reported" | "estimated" | "unknown";
   compactThresholdTokens: number;
   percentOfThreshold: number | null;
+  thresholdRatio?: number | undefined;
   mode: "root" | "managed-child";
   enabled: boolean;
   toolOutputsReduced: number;

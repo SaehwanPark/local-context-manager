@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ContextTelemetry, formatTelemetryDetails, formatTelemetryStatus } from "../src/telemetry.js";
+import {
+  ContextTelemetry,
+  formatTelemetryDetails,
+  formatTelemetryStatus,
+  formatTokenSourceDescription,
+} from "../src/telemetry.js";
 
 describe("telemetry", () => {
   it("tracks context growth after compaction and reduced tool output", () => {
@@ -21,16 +26,16 @@ describe("telemetry", () => {
     expect(snapshot.lastCompactionTurn).toBe(3);
     expect(snapshot.checkpointResets).toBe(4);
     expect(snapshot.lastCheckpointPath).toBe("/tmp/checkpoint-2.md");
-    expect(snapshot.tokenSource).toBe("reported");
+    expect(snapshot.tokenSource).toBe("pi-estimate");
     expect(formatTelemetryStatus(snapshot)).toContain("ctx 11k/32k");
-    expect(formatTelemetryDetails(snapshot)).toContain("Token source: reported");
+    expect(formatTelemetryDetails(snapshot)).toContain("Token source: Pi estimate");
     expect(formatTelemetryDetails(snapshot)).toContain("Last checkpoint reset");
   });
 
   it("uses an estimate when provider usage is unavailable", () => {
     const telemetry = new ContextTelemetry();
     telemetry.observeEstimate(5_000, 32_000);
-    expect(telemetry.snapshot(10_000).tokenSource).toBe("estimated");
+    expect(telemetry.snapshot(10_000).tokenSource).toBe("local-fallback");
     expect(formatTelemetryStatus(telemetry.snapshot(10_000))).toContain("ctx ~5.0k/10k");
     telemetry.observe({ tokens: null, contextWindow: 32_000 });
     expect(telemetry.snapshot(10_000).contextTokens).toBe(null);
@@ -39,7 +44,15 @@ describe("telemetry", () => {
     telemetry.observeEstimate(7_000);
     expect(telemetry.snapshot(10_000).tokensAddedSinceCompaction).toBe(2_000);
     expect(telemetry.snapshot(10_000).checkpointResets).toBe(0);
-    expect(telemetry.snapshot(10_000).tokenSource).toBe("estimated");
+    expect(telemetry.snapshot(10_000).tokenSource).toBe("local-fallback");
     expect(formatTelemetryStatus(telemetry.snapshot(10_000))).toContain("ctx ~7.0k/10k");
+  });
+
+  it("formats token source descriptions accurately", () => {
+    expect(formatTokenSourceDescription("pi-estimate")).toBe("Pi estimate");
+    expect(formatTokenSourceDescription("reported")).toBe("Pi estimate");
+    expect(formatTokenSourceDescription("local-fallback")).toBe("local fallback estimate");
+    expect(formatTokenSourceDescription("estimated")).toBe("local fallback estimate");
+    expect(formatTokenSourceDescription("unknown")).toBe("unknown");
   });
 });

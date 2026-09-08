@@ -34,9 +34,11 @@ import {
   ContextTelemetry,
   formatTelemetryDetails,
   formatTelemetryStatus,
+  formatTokenSourceDescription,
 } from "./telemetry.js";
 import {
   appendFullOutputNotice,
+  cleanupRecoveryStorage,
   extractFullOutputPath,
   reduceToolOutput,
   saveRecoveryCopy,
@@ -398,6 +400,7 @@ export default function (pi: ExtensionAPI): void {
   });
   const evidenceTracker = new EvidenceReductionTracker();
   let semanticResetDeferredNotified = false;
+  let semanticCompactionDeferredNotified = false;
   const warned = { value: false };
   let turnSerial = 0;
   let sessionGeneration = 0;
@@ -468,8 +471,10 @@ export default function (pi: ExtensionAPI): void {
       ...(reason === "semantic" && semanticReason !== undefined ? { semanticReason } : {}),
     };
     requestedCompaction = pending;
-    semanticRequested = false;
-    semanticReason = undefined;
+    if (reason === "semantic") {
+      semanticRequested = false;
+      semanticReason = undefined;
+    }
     const isCurrentRequest = (): boolean =>
       requestedCompaction === pending && pending.generation === sessionGeneration;
     const options = buildCompactionOptions(
@@ -554,6 +559,7 @@ export default function (pi: ExtensionAPI): void {
     checkpointResetReason = undefined;
     evidenceTracker.markCompaction();
     semanticResetDeferredNotified = false;
+    semanticCompactionDeferredNotified = false;
 
     const paths = await getPiPathSettings();
     if (generation !== sessionGeneration) {
@@ -641,6 +647,8 @@ export default function (pi: ExtensionAPI): void {
     requestedCompaction = undefined;
     semanticRequested = false;
     semanticReason = undefined;
+    semanticCompactionDeferredNotified = false;
+    void cleanupRecoveryStorage();
     if (context.hasUI) {
       context.ui.setStatus(EXTENSION_STATUS_KEY, undefined);
     }
@@ -674,9 +682,10 @@ export default function (pi: ExtensionAPI): void {
     const observed = observeContext(context, config, telemetry, gate);
     notifySoftWarning(context, config, telemetry, warned, observed);
 
-    if (checkpointResetRequested) {
-      const reason = checkpointResetReason;
-      let fabricSnapshot: FabricStateSnapshotV1 | undefined;
+    const fabricProvider = getInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME);
+    let fabricSnapshot: FabricStateSnapshotV1 | undefined;
+    let fabricQueryFailed = false;
+    if (fabricProvider !== undefined) {
       try {
         let sessionFile: string | undefined;
         try {
@@ -688,15 +697,24 @@ export default function (pi: ExtensionAPI): void {
           cwd: context.cwd,
           ...(sessionFile ? { sessionId: sessionFile } : {}),
         });
+        if (!fabricSnapshot) {
+          fabricQueryFailed = true;
+        }
       } catch {
-        fabricSnapshot = undefined;
+        fabricQueryFailed = true;
       }
+    }
 
-      const fabricActiveAndBusy = fabricSnapshot?.active && !fabricSnapshot.quiescent;
+    const fabricActiveAndBusy = Boolean(fabricSnapshot?.active && !fabricSnapshot.quiescent);
+    const isFabricUncertain = fabricProvider !== undefined && (fabricQueryFailed || !fabricSnapshot);
+    const deferFabricWork = fabricActiveAndBusy || isFabricUncertain;
+
+    if (checkpointResetRequested) {
+      const reason = checkpointResetReason;
       const atHardCeiling =
         observed.tokens !== null && observed.tokens >= observed.thresholds.hardCeilingTokens;
 
-      if (fabricActiveAndBusy && !atHardCeiling) {
+      if (deferFabricWork && !atHardCeiling) {
         debugLog(config, "automatic semantic reset deferred: active safe-agent fabric is not quiescent");
         if (context.hasUI && !semanticResetDeferredNotified) {
           semanticResetDeferredNotified = true;
@@ -712,7 +730,7 @@ export default function (pi: ExtensionAPI): void {
         if (context.hasUI) {
           const suffix = reason ? ` (${reason})` : "";
           const ceilingWarning =
-            atHardCeiling && fabricActiveAndBusy
+            atHardCeiling && deferFabricWork
               ? " [hard ceiling reached; proceeding with fabric snapshot]"
               : "";
           context.ui.notify(
@@ -724,14 +742,26 @@ export default function (pi: ExtensionAPI): void {
     }
 
     if (semanticRequested && config.enabled && config.semanticCompaction) {
-      scheduleSettledCompaction(
-        context,
-        "semantic",
-        semanticReason
-          ? `${SEMANTIC_COMPACTION_INSTRUCTIONS} Completed phase: ${semanticReason}`
-          : SEMANTIC_COMPACTION_INSTRUCTIONS,
-      );
-      return;
+      if (deferFabricWork) {
+        debugLog(config, "semantic compaction deferred: active safe-agent fabric is not quiescent");
+        if (context.hasUI && !semanticCompactionDeferredNotified) {
+          semanticCompactionDeferredNotified = true;
+          context.ui.notify(
+            "Semantic compaction deferred: delegated child agents are still active.",
+            "info",
+          );
+        }
+      } else {
+        semanticCompactionDeferredNotified = false;
+        scheduleSettledCompaction(
+          context,
+          "semantic",
+          semanticReason
+            ? `${SEMANTIC_COMPACTION_INSTRUCTIONS} Completed phase: ${semanticReason}`
+            : SEMANTIC_COMPACTION_INSTRUCTIONS,
+        );
+        return;
+      }
     }
     if (config.enabled && shouldTriggerThresholdCompaction(observed.tokens, observed.thresholds.compactThresholdTokens)) {
       scheduleSettledCompaction(context, "threshold");
@@ -767,7 +797,7 @@ export default function (pi: ExtensionAPI): void {
     }
     const postTokens =
       usage?.tokens ?? (activeEntries.length > 0 ? estimateActiveContextTokens(activeEntries) : null);
-    const tokenSource = usage?.tokens !== null ? "reported" : "estimated";
+    const tokenSource = usage?.tokens !== null ? "pi-estimate" : "local-fallback";
 
     telemetry.markCompaction(
       parseTimestamp(event.compactionEntry.timestamp) ?? Date.now(),
@@ -782,6 +812,7 @@ export default function (pi: ExtensionAPI): void {
     requestedCompaction = undefined;
     semanticRequested = false;
     semanticReason = undefined;
+    semanticCompactionDeferredNotified = false;
     warned.value = false;
     updateStatus(context, config, telemetry, thresholds);
     debugLog(config, `compaction completed (${event.reason})`);
@@ -845,7 +876,7 @@ export default function (pi: ExtensionAPI): void {
     let content = reduction.content;
     let fullOutputPath = extractFullOutputPath(event.details, reduction.originalText);
     if (!fullOutputPath) {
-      fullOutputPath = await saveRecoveryCopy(reduction.originalText);
+      fullOutputPath = await saveRecoveryCopy(reduction.originalText, event.toolName);
       if (generation !== sessionGeneration) {
         debugLog(config, "ignoring stale tool result after session change");
         return;
@@ -979,13 +1010,17 @@ export default function (pi: ExtensionAPI): void {
     const semanticResetStatus = checkpointResetRequested
       ? (fabricStatus === "active" ? "deferred by active fabric" : "ready")
       : "ready";
+    const semanticCompactionStatus = semanticRequested
+      ? (fabricStatus === "active" ? "deferred by active fabric" : "queued")
+      : "none";
 
     const details = [
       formatTelemetryDetails(snapshot),
-      `Context source: ${snapshot.tokenSource}`,
+      `Context source: ${formatTokenSourceDescription(snapshot.tokenSource)}`,
       `Embedded provider: ${embeddedAvailable ? "available" : "unavailable"}`,
       `Fabric provider: ${fabricStatus}`,
       `Semantic reset: ${semanticResetStatus}`,
+      `Semantic compaction: ${semanticCompactionStatus}`,
       `Reduced outputs since compaction: ${evidenceTracker.reducedSinceLastCompactionCount}`,
       `Context mode: ${config.contextProfile}`,
       `Effective thresholds: ${formatThresholdSummary(observed.thresholds)}`,

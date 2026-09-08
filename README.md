@@ -34,8 +34,10 @@ The extension works with Pi's existing models and configuration. It does not ins
 - balanced-by-default context profiles (`aggressive`, `balanced`, `relaxed`) with automatic downward adaptation for small model windows;
 - guarded proactive compaction at safe idle boundaries;
 - conservative reduction of only new oversized tool results, with a recovery path;
-- intentional phase compaction with `/compact-phase`;
-- reviewed `/handoff` and `/checkpoint-reset` workflows for starting a fresh session without silently discarding important work.
+- intentional phase compaction with `/compact-phase` that defers while delegated child agents are active;
+- reviewed `/handoff` and `/checkpoint-reset` workflows for starting a fresh session without silently discarding important work;
+- cross-project reset safety refusing normal session replacement during active child delegation unless explicitly forced via `/checkpoint-reset --force`;
+- bounded session recovery storage (`0700` dir / `0600` files) with automatic prune and clean shutdown cleanup.
 
 All session-changing workflows are reviewable. The extension does not automatically reset sessions or inject archived checkpoints into later prompts.
 

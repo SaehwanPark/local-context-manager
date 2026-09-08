@@ -27,6 +27,7 @@ import {
   getRepositoryState,
   listCheckpointFiles,
   makeCheckpointResetRecord,
+  parseResetArguments,
   repositoryIdentifier,
   resolveCheckpointDirectory,
   runCheckpointReset,
@@ -398,5 +399,32 @@ describe("reset transaction", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe("parseResetArguments", () => {
+  it("parses empty arguments", () => {
+    expect(parseResetArguments("")).toEqual({ force: false, reason: undefined });
+    expect(parseResetArguments("   ")).toEqual({ force: false, reason: undefined });
+  });
+
+  it("parses reason without force flag", () => {
+    expect(parseResetArguments("completed milestone 1")).toEqual({
+      force: false,
+      reason: "completed milestone 1",
+    });
+  });
+
+  it("parses --force and -f flags with and without reasons", () => {
+    expect(parseResetArguments("--force")).toEqual({ force: true, reason: undefined });
+    expect(parseResetArguments("-f")).toEqual({ force: true, reason: undefined });
+    expect(parseResetArguments("--force emergency reset")).toEqual({
+      force: true,
+      reason: "emergency reset",
+    });
+    expect(parseResetArguments("emergency reset -f")).toEqual({
+      force: true,
+      reason: "emergency reset",
+    });
   });
 });

@@ -65,8 +65,12 @@ describe("EmbeddedContextManager", () => {
     const manager = createEmbeddedContextManager(host, { contextWindow: 200_000 });
     const snapshot = manager.snapshot();
 
-    expect(snapshot.tokenSource).toBe("estimated");
+    expect(snapshot.tokenSource).toBe("local-fallback");
     expect(snapshot.contextTokens).toBeGreaterThan(0);
+    expect(snapshot.tokens).toBe(snapshot.contextTokens);
+    expect(snapshot.thresholdRatio).toBe(
+      snapshot.percentOfThreshold !== null ? snapshot.percentOfThreshold / 100 : undefined,
+    );
   });
 
   it("transforms tool result with reduction, evidence tracking, and recovery notice", async () => {
