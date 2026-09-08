@@ -37,10 +37,10 @@ pi install git:github.com/SaehwanPark/local-context-manager
 
 Pi installs the package and its runtime dependency, then records it in your user package settings. The package declares its Pi compatibility as `>=0.84.4 <1`.
 
-To pin a specific release version (such as `v0.3.3`) instead of following the latest default branch:
+To pin a specific release version (such as `v0.4.3`) instead of following the latest default branch:
 
 ```bash
-pi install git:github.com/SaehwanPark/local-context-manager#v0.3.3
+pi install git:github.com/SaehwanPark/local-context-manager#v0.4.3
 ```
 
 > **npm note:** Due to ongoing deployment setup issues on npm, installing directly from GitHub via `git:...` is recommended by default.
@@ -95,7 +95,7 @@ pi update git:github.com/SaehwanPark/local-context-manager
 If you installed a pinned version, move it explicitly to a newer version:
 
 ```bash
-pi install git:github.com/SaehwanPark/local-context-manager#v0.3.3
+pi install git:github.com/SaehwanPark/local-context-manager#v0.4.3
 ```
 
 Remove it with:

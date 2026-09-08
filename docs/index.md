@@ -54,7 +54,7 @@ The extension is designed for the middle ground: keep the active conversation sm
    ```bash
    pi install git:github.com/SaehwanPark/local-context-manager
    ```
-   *(To pin a specific release version, append `#<tag>`, e.g., `pi install git:github.com/SaehwanPark/local-context-manager#v0.3.3`)*
+   *(To pin a specific release version, append `#<tag>`, e.g., `pi install git:github.com/SaehwanPark/local-context-manager#v0.4.3`)*
 3. Start Pi in a project (`pi`) or reload an already-running session with `/reload`.
 4. Run:
    ```text

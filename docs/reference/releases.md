@@ -7,7 +7,7 @@ description: Release history and installation links for local-context-manager.
 
 [Documentation portal]({{ '/' | relative_url }}) · [Installation & first launch]({{ '/guides/installation.html' | relative_url }}) · [GitHub changelog](https://github.com/SaehwanPark/local-context-manager/blob/main/CHANGELOG.md)
 
-The current source release is **`{{ site.version }}`**. GitHub and the Pages site document v0.3.8. While npm package deployment is pending trusted-publishing configuration, installing directly from GitHub via `git:...` is recommended by default.
+The current source release is **`{{ site.version }}`**. GitHub and the Pages site document v0.4.3. While npm package deployment is pending trusted-publishing configuration, installing directly from GitHub via `git:...` is recommended by default.
 
 ## Install the current release
 
@@ -17,10 +17,10 @@ Install directly from GitHub:
 pi install git:github.com/SaehwanPark/local-context-manager
 ```
 
-To pin a specific release version (for example `v0.3.3`):
+To pin a specific release version (for example `v0.4.3`):
 
 ```bash
-pi install git:github.com/SaehwanPark/local-context-manager#v0.3.3
+pi install git:github.com/SaehwanPark/local-context-manager#v0.4.3
 ```
 
 - [GitHub repository](https://github.com/SaehwanPark/local-context-manager)
@@ -31,6 +31,10 @@ pi install git:github.com/SaehwanPark/local-context-manager#v0.3.3
 
 | Version | Milestone | Highlights |
 | --- | --- | --- |
+| **0.4.3** | Joint audit hardening | Provider-owned quiescence, recovery-safe embedded deactivation, strict snapshot validation, and session-scoped safe-agent fabrics. |
+| **0.4.2** | Cross-project V1 interoperability | Fail-closed fabric state handling, isolated embedded recovery, coordinated reset safety, and portable smoke coverage. |
+| **0.4.1** | Cross-project reset protection | Safe-agent fabric coordination, forced reset archives, semantic compaction deferral, and bounded recovery storage. |
+| **0.4.0** | Embedded companion integration | Embeddable context management, interop providers, fabric-aware semantic reset, and isolated Pi smoke tests. |
 | **0.3.8** | Compaction event identity isolation (GitHub source release) | Retired/duplicate completion events cannot mutate a newer request; npm publication is pending trusted-publisher setup. |
 | **0.3.7** | Settled compaction lifecycle isolation | Deferred settled compaction skips replaced sessions. |
 | **0.3.6** | Stale callback containment | Invalidated compaction callbacks cannot surface unhandled UI/status errors. |
