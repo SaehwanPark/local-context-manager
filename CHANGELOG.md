@@ -2,9 +2,9 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
-## Unreleased
+## [0.4.3] - 2026-09-08
 
-### Fixed
+This patch completes the joint hardening pass with `pi-safe-agent-team`, closing the remaining quiescence, recovery-lifetime, and concurrent-session isolation gaps.
 
 - **Provider-Owned Fabric Quiescence**: Semantic compaction and reset recommendations now trust the safe-agent provider's complete `quiescent` projection, while retaining only the narrowly justified root-only settled-event lag exception.
 - **Strict Fabric Snapshot Validation**: Require safe integer counters and reject contradictory known active snapshots that claim session replacement is safe while non-quiescent.
@@ -183,6 +183,10 @@ Initial extension milestone delivered by [PR #1](https://github.com/SaehwanPark/
 - Reviewed `/handoff <objective>` continuation prompts and fresh-session initialization.
 - Package metadata, examples, tests, and build/typecheck configuration.
 
+[0.4.3]: https://github.com/SaehwanPark/local-context-manager/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/SaehwanPark/local-context-manager/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/SaehwanPark/local-context-manager/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.8...v0.4.0
 [0.3.8]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/SaehwanPark/local-context-manager/compare/v0.3.5...v0.3.6

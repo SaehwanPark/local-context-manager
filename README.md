@@ -14,10 +14,10 @@ Install the extension directly from GitHub by default:
 pi install git:github.com/SaehwanPark/local-context-manager
 ```
 
-To pin a specific release version (e.g., `v0.3.3`):
+To pin a specific release version (e.g., `v0.4.3`):
 
 ```bash
-pi install git:github.com/SaehwanPark/local-context-manager#v0.3.3
+pi install git:github.com/SaehwanPark/local-context-manager#v0.4.3
 ```
 
 Start (or reload) Pi in your project, then try:
