@@ -49,14 +49,19 @@ describe("compaction policy", () => {
     expect(gate.canRequest(3, false)).toBe(true);
   });
 
-  it("rearms when context re-enters compactThresholdTokens even if postTokens was above rearmTokens", () => {
-    const gate = new CompactionGate({ rearmTokens: 24_000, growthMargin: 10_000 });
+  it("requires meaningful growth before rearming even when context re-enters threshold", () => {
+    const gate = new CompactionGate({ rearmTokens: 24_000, growthMargin: 5_000 });
     gate.request(1);
     gate.complete(29_000, 1);
     expect(gate.isArmed).toBe(false);
 
-    // Context reaches 32_000 (compactThresholdTokens)
+    // Context reaches 32_000 (+3,000 growth < margin 5_000): remains disarmed
     gate.observe(32_000, 32_000);
+    expect(gate.isArmed).toBe(false);
+    expect(gate.canRequest(3, false)).toBe(false);
+
+    // Context reaches 34_000 (+5,000 growth >= margin 5_000): rearms
+    gate.observe(34_000, 32_000);
     expect(gate.isArmed).toBe(true);
     expect(gate.canRequest(3, false)).toBe(true);
   });
@@ -81,6 +86,28 @@ describe("compaction policy", () => {
 
     // Meaningful growth beyond 33k (>= 33k + margin, e.g. 35_500): rearms
     gate.observe(35_500, 32_000);
+    expect(gate.isArmed).toBe(true);
+    expect(gate.canRequest(3, false)).toBe(true);
+  });
+
+  it("does not rearm on tiny growth when compaction lands near the threshold", () => {
+    const gate = new CompactionGate({ rearmTokens: 24_000, minimumTurnGap: 2 });
+    gate.request(1);
+    gate.complete(31_900);
+    expect(gate.isArmed).toBe(false);
+
+    // Minor growth below margin (31_900 -> 32_000 crossing threshold): remains disarmed
+    gate.observe(32_000, 32_000);
+    expect(gate.isArmed).toBe(false);
+    expect(gate.canRequest(3, false)).toBe(false);
+
+    // Minor growth below margin (31_900 -> 32_500): remains disarmed
+    gate.observe(32_500, 32_000);
+    expect(gate.isArmed).toBe(false);
+    expect(gate.canRequest(3, false)).toBe(false);
+
+    // Meaningful growth (31_900 + 2400 margin = 34_300): rearms
+    gate.observe(34_300, 32_000);
     expect(gate.isArmed).toBe(true);
     expect(gate.canRequest(3, false)).toBe(true);
   });
