@@ -14,6 +14,7 @@ import {
   saveRecoveryCopy,
   SessionRecoveryStorage,
   sweepStaleRecoveryDirectories,
+  touchSessionLease,
 } from "../src/tool-output.js";
 
 function textResult(text: string, overrides: Partial<Parameters<typeof reduceToolOutput>[0]> = {}) {
@@ -500,6 +501,208 @@ describe("tool-output reduction", () => {
       // Active dir should still exist; stale dir should have been swept
       expect(await stat(activeDir).then(() => true).catch(() => false)).toBe(true);
       expect(await stat(staleDir).then(() => true).catch(() => false)).toBe(false);
+    } finally {
+      await rm(baseDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("generates immutable UUID filenames and never overwrites existing files even with stale fileSeq", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "pi-lcm-test-uuid-"));
+    const sessionId = "session-uuid-test";
+    try {
+      const storage = new SessionRecoveryStorage({ sessionId, baseDirectory: baseDir });
+      const dir = await storage.getDirectory();
+
+      // Pre-create a file that might conflict under old counter schemes
+      const existingLegacyFile = join(dir, "output-1-bash.txt");
+      await writeFile(existingLegacyFile, "original legacy content", "utf8");
+
+      // Save a new file
+      const path1 = await storage.save("new content 1", "bash");
+      expect(path1).toBeDefined();
+      expect(path1).not.toBe(existingLegacyFile);
+
+      // Verify the existing file was NOT touched or overwritten
+      const legacyContent = await readFile(existingLegacyFile, "utf8");
+      expect(legacyContent).toBe("original legacy content");
+
+      // Verify path1 has UUID pattern: output-<uuid>-bash.txt
+      expect(path1).toMatch(/output-[a-f0-9-]{36}-bash\.txt$/);
+    } finally {
+      await rm(baseDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("reconciles unmanifested output files from session directory on startup", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "pi-lcm-test-reconcile-"));
+    const sessionId = "session-reconcile-test";
+    try {
+      const storage1 = new SessionRecoveryStorage({ sessionId, baseDirectory: baseDir });
+      const dir = await storage1.getDirectory();
+
+      // Simulate an unmanifested file created before a process crash
+      const unmanifestedFile = join(dir, "output-crash-recovery-bash.txt");
+      await writeFile(unmanifestedFile, "unmanifested crash content", "utf8");
+
+      // Create a new instance (simulating restart)
+      const storage2 = new SessionRecoveryStorage({ sessionId, baseDirectory: baseDir });
+      expect(storage2.activeFilesCount).toBe(1);
+
+      // Verify noteReferences tracks and remembers the reconciled file
+      storage2.noteReferences({ command: `cat ${unmanifestedFile}` });
+      expect(storage2.findPrunedReferences({ command: `cat ${unmanifestedFile}` })).toHaveLength(0);
+    } finally {
+      await rm(baseDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("rejects path-traversal, malformed entries, and mismatched sessionIds in manifest", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "pi-lcm-test-security-"));
+    const sessionId = "session-security-test";
+    try {
+      const storage = new SessionRecoveryStorage({ sessionId, baseDirectory: baseDir });
+      const dir = await storage.getDirectory();
+
+      // Create an external secret file outside recovery directory
+      const externalFile = join(baseDir, "secret.txt");
+      await writeFile(externalFile, "sensitive data", "utf8");
+
+      // Valid recovery file inside directory
+      const validFile = join(dir, "output-valid-bash.txt");
+      await writeFile(validFile, "valid content", "utf8");
+
+      // Craft a malicious manifest with path traversal, non-output filenames, negative sizes
+      const maliciousManifest = {
+        version: 1,
+        sessionId,
+        updatedAt: Date.now(),
+        fileSeq: 10,
+        managedFiles: [
+          { path: externalFile, size: 100 },
+          { path: join(dir, "unrelated-file.sh"), size: 50 },
+          { path: join(dir, "output-negative-bash.txt"), size: -500 },
+          { path: validFile, size: 13 },
+        ],
+        prunedPaths: [externalFile, "/etc/passwd"],
+      };
+      await writeFile(join(dir, "manifest.json"), JSON.stringify(maliciousManifest), "utf8");
+
+      // Reload in fresh instance
+      const storage2 = new SessionRecoveryStorage({ sessionId, baseDirectory: baseDir, maxFiles: 1 });
+      // Only validFile should be tracked!
+      expect(storage2.activeFilesCount).toBe(1);
+
+      // Now force prune by saving 1 more file with maxFiles: 1
+      await storage2.save("another file", "bash");
+
+      // The external file MUST NOT have been pruned / removed!
+      expect(await stat(externalFile).then(() => true).catch(() => false)).toBe(true);
+
+      // Test mismatched sessionId in manifest: manifest should be ignored
+      const mismatchedManifest = {
+        version: 1,
+        sessionId: "wrong-session",
+        updatedAt: Date.now(),
+        fileSeq: 99,
+        managedFiles: [{ path: validFile, size: 13 }],
+        prunedPaths: [],
+      };
+      const extraFile = join(dir, "output-extra-bash.txt");
+      await writeFile(extraFile, "extra content", "utf8");
+      await writeFile(join(dir, "manifest.json"), JSON.stringify(mismatchedManifest), "utf8");
+
+      const storage3 = new SessionRecoveryStorage({ sessionId, baseDirectory: baseDir });
+      // Mismatched manifest ignored, but filesystem reconciliation picks up valid unmanifested files on disk
+      expect(storage3.activeFilesCount).toBe(2);
+    } finally {
+      await rm(baseDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("produces distinct immutable paths when multiple instances save concurrently", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "pi-lcm-test-concurrent-"));
+    const sessionId = "session-concurrent-test";
+    try {
+      const storageA = new SessionRecoveryStorage({ sessionId, baseDirectory: baseDir });
+      const storageB = new SessionRecoveryStorage({ sessionId, baseDirectory: baseDir });
+
+      const [pathA, pathB] = await Promise.all([
+        storageA.save("concurrent output A", "bash"),
+        storageB.save("concurrent output B", "bash"),
+      ]);
+
+      expect(pathA).toBeDefined();
+      expect(pathB).toBeDefined();
+      expect(pathA).not.toBe(pathB);
+
+      const contentA = await readFile(pathA!, "utf8");
+      const contentB = await readFile(pathB!, "utf8");
+      expect(contentA).toBe("concurrent output A");
+      expect(contentB).toBe("concurrent output B");
+    } finally {
+      await rm(baseDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("refreshes ancestor session lease when an ancestor recovery path is referenced in a child session", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "pi-lcm-test-ancestor-"));
+    try {
+      const storageParent = new SessionRecoveryStorage({ sessionId: "session-parent", baseDirectory: baseDir });
+      const parentFile = await storageParent.save("parent output", "bash");
+      expect(parentFile).toBeDefined();
+
+      const parentDir = await storageParent.getDirectory();
+      const initialHb = await readFile(join(parentDir, "heartbeat"), "utf8");
+
+      // Wait a tiny bit to advance time
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Child session is created (e.g. after fork)
+      const storageChild = new SessionRecoveryStorage({ sessionId: "session-child", baseDirectory: baseDir });
+      await storageChild.getDirectory();
+
+      // Child tool input references parent session's file
+      storageChild.noteReferences({ command: `cat ${parentFile}` });
+
+      // Poll parent heartbeat until updated by background lease touch
+      let afterHb = 0;
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        const raw = await readFile(join(parentDir, "heartbeat"), "utf8").catch(() => "");
+        const val = Number(raw.trim());
+        if (!Number.isNaN(val) && val > Number(initialHb)) {
+          afterHb = val;
+          break;
+        }
+      }
+      expect(afterHb).toBeGreaterThan(Number(initialHb));
+    } finally {
+      await rm(baseDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("touches session lease heartbeat using touchSessionLease helper", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "pi-lcm-test-touch-"));
+    const sessionId = "session-touch-lease-test";
+    try {
+      const storage = new SessionRecoveryStorage({ sessionId, baseDirectory: baseDir });
+      const dir = await storage.getDirectory();
+      const initialHb = await readFile(join(dir, "heartbeat"), "utf8");
+
+      await new Promise((r) => setTimeout(r, 20));
+      await touchSessionLease(sessionId, baseDir, true);
+
+      let afterHb = 0;
+      for (let i = 0; i < 40; i++) {
+        const raw = await readFile(join(dir, "heartbeat"), "utf8").catch(() => "");
+        const val = Number(raw.trim());
+        if (!Number.isNaN(val) && val > Number(initialHb)) {
+          afterHb = val;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(afterHb).toBeGreaterThan(Number(initialHb));
     } finally {
       await rm(baseDir, { recursive: true, force: true }).catch(() => undefined);
     }

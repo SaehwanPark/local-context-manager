@@ -43,6 +43,7 @@ import {
   getSessionRecoveryStorage,
   reduceToolOutput,
   setRecoveryStorageDiagnostics,
+  touchSessionLease,
 } from "./tool-output.js";
 import {
   cleanBoundaryReason,
@@ -708,6 +709,14 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", async (_event, context) => {
+    let currentSessionId: string | undefined;
+    try {
+      currentSessionId = resolveSessionId(context.sessionManager);
+    } catch {
+      currentSessionId = undefined;
+    }
+    void touchSessionLease(currentSessionId).catch(() => undefined);
+
     const observed = observeContext(context, config, telemetry, gate);
     notifySoftWarning(context, config, telemetry, warned, observed);
 
@@ -718,13 +727,6 @@ export default function (pi: ExtensionAPI): void {
 
     let observation: FabricObservation = { kind: "absent" };
     if (needsFabric) {
-      let currentSessionId: string | undefined;
-      try {
-        currentSessionId = resolveSessionId(context.sessionManager);
-      } catch {
-        currentSessionId = undefined;
-      }
-
       observation = await queryFabricObservation({
         cwd: context.cwd,
         ...(currentSessionId ? { sessionId: currentSessionId } : {}),
