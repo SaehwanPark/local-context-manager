@@ -14,10 +14,10 @@ Install the extension directly from GitHub by default:
 pi install git:github.com/SaehwanPark/local-context-manager
 ```
 
-To pin a specific release version (e.g., `v0.4.3`):
+To pin a specific release version (e.g., `v0.5.0`):
 
 ```bash
-pi install git:github.com/SaehwanPark/local-context-manager#v0.4.3
+pi install git:github.com/SaehwanPark/local-context-manager#v0.5.0
 ```
 
 Start (or reload) Pi in your project, then try:
@@ -37,7 +37,7 @@ The extension works with Pi's existing models and configuration. It does not ins
 - intentional phase compaction with `/compact-phase` that defers while delegated child agents are active;
 - reviewed `/handoff` and `/checkpoint-reset` workflows for starting a fresh session without silently discarding important work;
 - cross-project reset safety refusing normal session replacement during active child delegation unless explicitly forced via `/checkpoint-reset --force`;
-- bounded session recovery storage (`0700` dir / `0600` files on POSIX; inherits `%TEMP%` ACLs on Windows) with automatic prune and clean shutdown cleanup.
+- session-addressable recovery storage (`0700` dir / `0600` files on POSIX; inherits `%TEMP%` ACLs on Windows) with manifest-backed persistence across resume/restart, LRU pruning, and stale session sweeping.
 
 All session-changing workflows are reviewable. The extension does not automatically reset sessions or inject archived checkpoints into later prompts.
 

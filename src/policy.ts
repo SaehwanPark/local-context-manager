@@ -55,15 +55,19 @@ export class CompactionGate {
     // Condition 2: Post-compaction epoch growth or threshold re-entry.
     // If a compaction landed above rearmTokens (e.g. 28k with rearm at 24k),
     // do not permanently lock out future proactive compactions as context grows.
+    // However, if the compaction landed at or above compactThresholdTokens (e.g. 33k when threshold is 32k),
+    // simply being >= compactThresholdTokens is NOT a threshold re-entry; it requires meaningful growth
+    // beyond postCompactionTokens to avoid a periodic compaction loop every 2 turns.
     if (!this.armed && this.postCompactionTokens !== null) {
       const margin = Math.max(this.growthMargin, Math.floor(this.rearmTokens * 0.1));
       const hasMeaningfulGrowth = tokens >= this.postCompactionTokens + margin;
-      const reachedThreshold =
+      const crossedThreshold =
         compactThresholdTokens !== undefined &&
         Number.isFinite(compactThresholdTokens) &&
+        this.postCompactionTokens < compactThresholdTokens &&
         tokens >= compactThresholdTokens;
 
-      if (hasMeaningfulGrowth || reachedThreshold) {
+      if (hasMeaningfulGrowth || crossedThreshold) {
         this.armed = true;
         this.failureCount = 0;
         this.retryNotBeforeTurn = null;

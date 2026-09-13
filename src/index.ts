@@ -67,6 +67,7 @@ import {
   queryFabricObservation,
   registerInteropProvider,
   resolveSessionId,
+  type FabricObservation,
 } from "./embedded/index.js";
 
 const EXTENSION_STATUS_KEY = "local-context-manager";
@@ -710,17 +711,25 @@ export default function (pi: ExtensionAPI): void {
     const observed = observeContext(context, config, telemetry, gate);
     notifySoftWarning(context, config, telemetry, warned, observed);
 
-    let currentSessionId: string | undefined;
-    try {
-      currentSessionId = resolveSessionId(context.sessionManager);
-    } catch {
-      currentSessionId = undefined;
-    }
+    const needsFabric = Boolean(
+      (checkpointResetRequested && config.enabled && config.checkpointReset) ||
+      (semanticRequested && config.enabled && config.semanticCompaction),
+    );
 
-    const observation = await queryFabricObservation({
-      cwd: context.cwd,
-      ...(currentSessionId ? { sessionId: currentSessionId } : {}),
-    });
+    let observation: FabricObservation = { kind: "absent" };
+    if (needsFabric) {
+      let currentSessionId: string | undefined;
+      try {
+        currentSessionId = resolveSessionId(context.sessionManager);
+      } catch {
+        currentSessionId = undefined;
+      }
+
+      observation = await queryFabricObservation({
+        cwd: context.cwd,
+        ...(currentSessionId ? { sessionId: currentSessionId } : {}),
+      });
+    }
 
     // The safe-agent provider owns the quiescence definition. Reproducing only
     // part of that definition here would silently become unsafe when the
@@ -843,9 +852,11 @@ export default function (pi: ExtensionAPI): void {
     gate.setRearmTokens(getRearmTokens(thresholds.softWarningTokens, thresholds.compactThresholdTokens));
     gate.complete(postTokens, turnSerial);
     requestedCompaction = undefined;
-    semanticRequested = false;
-    semanticReason = undefined;
-    semanticCompactionDeferredNotified = false;
+    if (pending?.reason === "semantic" || event.reason === "manual") {
+      semanticRequested = false;
+      semanticReason = undefined;
+      semanticCompactionDeferredNotified = false;
+    }
     warned.value = false;
     updateStatus(context, config, telemetry, thresholds);
     debugLog(config, `compaction completed (${event.reason})`);
@@ -889,7 +900,14 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
 
-    const recoveryStorage = getSessionRecoveryStorage();
+    let currentSessionId: string | undefined;
+    try {
+      currentSessionId = resolveSessionId(context.sessionManager);
+    } catch {
+      currentSessionId = undefined;
+    }
+
+    const recoveryStorage = getSessionRecoveryStorage(currentSessionId);
     // A read of a recovery copy keeps that copy alive through the next eviction,
     // and a failed read of one this session already deleted must say so instead
     // of returning an unexplained ENOENT for a path the transcript still names.
@@ -917,10 +935,6 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
 
-    if (reduction.category) {
-      evidenceTracker.record(reduction.category);
-    }
-
     let content = reduction.content;
     let fullOutputPath = extractFullOutputPath(event.details, reduction.originalText);
     if (!fullOutputPath) {
@@ -937,6 +951,9 @@ export default function (pi: ExtensionAPI): void {
       updateStatus(context, config, telemetry);
       debugLog(config, "could not save full tool output; preserving the original result");
       return;
+    }
+    if (reduction.category) {
+      evidenceTracker.record(reduction.category);
     }
     if (
       !content.some(
@@ -960,9 +977,10 @@ export default function (pi: ExtensionAPI): void {
     //    natively without deepening prefill on an already-pressured model.
     // 2. Threshold/manual compaction: return undefined so Pi's native preparation
     //    (~20k kept tokens) is used rather than deepening summarization prefill.
-    // 3. Explicit semantic phase compaction: use LCM's custom slice to preserve
-    //    phase boundary instructions and evidence reduction notes.
-    if (event.reason === "overflow" || requestedCompaction?.reason !== "semantic") {
+    // 3. Explicit semantic phase compaction: must be correlated to LCM's manual
+    //    compaction request; uses LCM's custom slice to preserve phase boundary
+    //    instructions and evidence reduction notes.
+    if (event.reason !== "manual" || requestedCompaction?.reason !== "semantic") {
       return undefined;
     }
     return buildCustomCompaction(
@@ -1105,7 +1123,7 @@ export default function (pi: ExtensionAPI): void {
       `Semantic reset: ${semanticResetStatus}`,
       `Semantic compaction: ${semanticCompactionStatus}`,
       `Reduced outputs since compaction: ${evidenceTracker.reducedSinceLastCompactionCount}`,
-      `Recovery copies pruned: ${getSessionRecoveryStorage().prunedFileCount}`,
+      `Recovery copies pruned: ${getSessionRecoveryStorage(currentSessionId).prunedFileCount}`,
       `Context mode: ${contextModeSummary()}`,
       `Effective thresholds: ${formatThresholdSummary(observed.thresholds)}`,
       `Soft warning: ${observed.thresholds.softWarningTokens.toLocaleString()} tokens`,

@@ -2,6 +2,24 @@
 
 All notable changes to `local-context-manager` are documented here. Version numbers also mark the project milestones represented by the merged pull requests.
 
+## [0.5.0] - 2026-09-13
+
+This major resilience and hardening release addresses all findings from the three failure-mode audits (PR #18, PR #19, and Round 3), ensuring the extension "does not make local-model context or compaction problems worse, and preferably makes them better."
+
+### Fixed
+
+- **CompactionGate Over-Threshold Hysteresis**: Fixed periodic compaction churn when a successful compaction lands at or above `compactThresholdTokens` (e.g. 33k tokens on a 32k threshold). The gate now checks `crossedThreshold` rather than `reachedThreshold`, requiring meaningful token growth (`growthRatio >= 1.05` and `>= 1,000` tokens) before rearming (`33k -> 33k` and `33k -> 33.5k` remain disarmed; `33k -> 35.5k` rearms).
+- **Session-Addressable Recovery Storage**: Replaced process-global storage with deterministic per-session storage directories (`pi-lcm-recovery/<session-hash>/`). Each session maintains an on-disk `manifest.json` recording managed files, sequence numbers, and pruned paths, enabling full recovery reattachment after process restart or session resume.
+- **Independent Session Quotas**: Isolated LRU quotas (50 files / 50 MB) per session, preventing unrelated active sessions from evicting each other's recovery copies.
+- **Heartbeat & Lease Refresh on Reference**: Touching or rereading an existing recovery copy updates the session's `heartbeat` lease and manifest timestamp, ensuring active long-running sessions are never swept by background cleanup.
+- **Lease-Aware Stale Directory Sweeping**: Sweeper checks heartbeat and manifest timestamps rather than directory filesystem mtimes, removing orphaned directories older than 3 days while protecting active sessions.
+- **Lazy Interop Fabric Querying**: `agent_settled` now queries fabric status lazily only when an explicit semantic compaction or checkpoint reset requires coordination, eliminating unnecessary 2-second stalls during routine threshold compaction.
+- **AbortSignal Interop Cancellation**: Integrated `signal?: AbortSignal` across LCM interop queries and companion `pi-safe-agent-team` broker requests (`FabricSnapshotRequest`, `getFabricStateSnapshot`, `status`, `BrokerClient.request`), immediately removing cancelled requests from pending state and preventing resource leaks.
+- **Strict Semantic Compaction Correlation**: In `session_before_compact`, deep semantic preparation is strictly correlated to manual LCM requests (`event.reason === "manual"`). Unrelated automatic compactions (overflow recovery or native Pi threshold compactions) preserve pending semantic intent.
+- **Conservative Evidence Timing**: In `tool_result`, evidence reduction counters are recorded only after full recovery output is successfully persisted to disk, preventing phantom reduction notices when storage fails.
+- **Native Compaction Invariant**: Routine proactive compaction delegates directly to Pi's native summarizer, and emergency overflow compactions are never intercepted or overridden.
+- **Documentation Drift**: Corrected relative `checkpointDirectory` resolution documentation to reflect that relative paths resolve from the Pi agent directory (never the repository working tree), updated `keepRecentTokens` documentation to clarify its semantic-only deep compaction role, updated recovery storage lifecycle descriptions, and updated pinned installation instructions to `#v0.5.0`.
+
 ## [0.4.3] - 2026-09-08
 
 This patch completes the joint hardening pass with `pi-safe-agent-team`, closing the remaining quiescence, recovery-lifetime, and concurrent-session isolation gaps.
@@ -183,6 +201,7 @@ Initial extension milestone delivered by [PR #1](https://github.com/SaehwanPark/
 - Reviewed `/handoff <objective>` continuation prompts and fresh-session initialization.
 - Package metadata, examples, tests, and build/typecheck configuration.
 
+[0.5.0]: https://github.com/SaehwanPark/local-context-manager/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/SaehwanPark/local-context-manager/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/SaehwanPark/local-context-manager/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/SaehwanPark/local-context-manager/compare/v0.4.0...v0.4.1

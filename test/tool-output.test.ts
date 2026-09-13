@@ -1,5 +1,6 @@
-import { rm, stat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   appendFullOutputNotice,
@@ -12,6 +13,7 @@ import {
   reduceToolOutput,
   saveRecoveryCopy,
   SessionRecoveryStorage,
+  sweepStaleRecoveryDirectories,
 } from "../src/tool-output.js";
 
 function textResult(text: string, overrides: Partial<Parameters<typeof reduceToolOutput>[0]> = {}) {
@@ -380,6 +382,127 @@ describe("tool-output reduction", () => {
 
     const pruned = storage.findPrunedReferences({ command: `cat ${savedPath}` });
     expect(pruned).toContain(savedPath);
+  });
+
+  it("isolates recovery storage and quotas per session", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "pi-lcm-test-iso-"));
+    try {
+      const storageA = new SessionRecoveryStorage({ sessionId: "session-A", baseDirectory: baseDir, maxFiles: 2 });
+      const storageB = new SessionRecoveryStorage({ sessionId: "session-B", baseDirectory: baseDir, maxFiles: 2 });
+
+      const fileA1 = await storageA.save("output A1", "bash");
+      const fileA2 = await storageA.save("output A2", "bash");
+      expect(storageA.activeFilesCount).toBe(2);
+
+      // Session B saves 3 files, overflowing B's quota
+      const fileB1 = await storageB.save("output B1", "bash");
+      const fileB2 = await storageB.save("output B2", "bash");
+      const fileB3 = await storageB.save("output B3", "bash");
+      expect(storageB.activeFilesCount).toBe(2);
+
+      // Session B's pruning must NOT evict Session A's files
+      expect(await stat(fileA1!).then(() => true).catch(() => false)).toBe(true);
+      expect(await stat(fileA2!).then(() => true).catch(() => false)).toBe(true);
+      // Session B's oldest file (fileB1) should be pruned, while fileB2 and fileB3 remain
+      expect(await stat(fileB1!).then(() => true).catch(() => false)).toBe(false);
+      expect(await stat(fileB2!).then(() => true).catch(() => false)).toBe(true);
+      expect(await stat(fileB3!).then(() => true).catch(() => false)).toBe(true);
+    } finally {
+      await rm(baseDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("reattaches to manifest across simulated process restart and detects offline file deletion", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "pi-lcm-test-restart-"));
+    const sessionId = "session-restart-test";
+    try {
+      // Process 1: save two files
+      const storage1 = new SessionRecoveryStorage({ sessionId, baseDirectory: baseDir });
+      const path1 = await storage1.save("content 1", "bash");
+      const path2 = await storage1.save("content 2", "bash");
+      expect(storage1.activeFilesCount).toBe(2);
+
+      // Verify manifest exists on disk
+      const dir = await storage1.getDirectory();
+      const manifestRaw = await readFile(join(dir, "manifest.json"), "utf8");
+      const manifest = JSON.parse(manifestRaw);
+      expect(manifest.version).toBe(1);
+      expect(manifest.sessionId).toBe(sessionId);
+      expect(manifest.managedFiles).toHaveLength(2);
+
+      // Simulate offline external deletion of path1
+      await rm(path1!, { force: true });
+
+      // Process 2: simulate restart by creating fresh instance with same sessionId and baseDir
+      const storage2 = new SessionRecoveryStorage({ sessionId, baseDirectory: baseDir });
+      // Manifest should be loaded; path1 was deleted offline, path2 is live
+      expect(storage2.activeFilesCount).toBe(1);
+      // path1 should be remembered as pruned
+      const pruned = storage2.findPrunedReferences({ command: `cat ${path1}` });
+      expect(pruned).toContain(path1);
+
+      // Saving a new file should pick up next sequence number without collision
+      const path3 = await storage2.save("content 3", "bash");
+      expect(path3).toBeDefined();
+      expect(path3).not.toBe(path1);
+      expect(path3).not.toBe(path2);
+      expect(storage2.activeFilesCount).toBe(2);
+    } finally {
+      await rm(baseDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("refreshes lease on reference and sweeper preserves active directories while deleting stale ones", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "pi-lcm-test-lease-"));
+    try {
+      const activeSession = new SessionRecoveryStorage({ sessionId: "active-session", baseDirectory: baseDir });
+      const activePath = await activeSession.save("active content", "bash");
+      expect(activePath).toBeDefined();
+
+      const staleSession = new SessionRecoveryStorage({ sessionId: "stale-session", baseDirectory: baseDir });
+      const stalePath = await staleSession.save("stale content", "bash");
+      expect(stalePath).toBeDefined();
+
+      const activeDir = await activeSession.getDirectory();
+      const staleDir = await staleSession.getDirectory();
+
+      // Read active session's heartbeat
+      const hbInitial = await readFile(join(activeDir, "heartbeat"), "utf8");
+
+      // Wait a tiny bit and touch active session via noteReferences
+      await new Promise((r) => setTimeout(r, 10));
+      activeSession.noteReferences({ command: `cat ${activePath}` });
+
+      // Allow background persist/touch to complete
+      await new Promise((r) => setTimeout(r, 30));
+      const hbAfter = await readFile(join(activeDir, "heartbeat"), "utf8");
+      expect(Number(hbAfter)).toBeGreaterThanOrEqual(Number(hbInitial));
+
+      // Artificially make staleDir's heartbeat and manifest 4 days old
+      const fourDaysAgo = Date.now() - 4 * 24 * 60 * 60 * 1000;
+      await writeFile(join(staleDir, "heartbeat"), String(fourDaysAgo), "utf8");
+      await writeFile(
+        join(staleDir, "manifest.json"),
+        JSON.stringify({
+          version: 1,
+          sessionId: "stale-session",
+          updatedAt: fourDaysAgo,
+          fileSeq: 1,
+          managedFiles: [],
+          prunedPaths: [],
+        }),
+        "utf8",
+      );
+
+      // Run sweeper on test baseDir
+      await sweepStaleRecoveryDirectories(baseDir);
+
+      // Active dir should still exist; stale dir should have been swept
+      expect(await stat(activeDir).then(() => true).catch(() => false)).toBe(true);
+      expect(await stat(staleDir).then(() => true).catch(() => false)).toBe(false);
+    } finally {
+      await rm(baseDir, { recursive: true, force: true }).catch(() => undefined);
+    }
   });
 });
 

@@ -1,4 +1,6 @@
-import { chmod, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -767,41 +769,106 @@ function inputHaystack(input: Record<string, unknown>): string {
   return parts.join("\n");
 }
 
-const RECOVERY_DIR_PREFIX = "pi-lcm-recovery-";
+const DEFAULT_BASE_RECOVERY_DIR = join(tmpdir(), "pi-lcm-recovery");
+const LEGACY_RECOVERY_DIR_PREFIX = "pi-lcm-recovery-";
 const STALE_RECOVERY_DIR_MS = 3 * 24 * 60 * 60 * 1000;
 const MAX_REMEMBERED_PRUNED = 256;
 let staleSweepStarted = false;
+
+export interface RecoveryManifest {
+  version: 1;
+  sessionId: string;
+  updatedAt: number;
+  fileSeq: number;
+  managedFiles: Array<{ path: string; size: number }>;
+  prunedPaths: string[];
+}
 
 /**
  * A crash or a killed process leaves recovery directories holding full,
  * unredacted tool output in the shared temp tree, and nothing else reaps them.
  * Only directories untouched for days are removed, so a live session's copies
- * are never swept.
+ * are never swept. Heartbeat and manifest updates keep active directories alive.
  */
-async function sweepStaleRecoveryDirectories(): Promise<void> {
-  const base = tmpdir();
-  const entries = await readdir(base, { withFileTypes: true }).catch(() => []);
+export async function sweepStaleRecoveryDirectories(
+  baseDir = DEFAULT_BASE_RECOVERY_DIR,
+): Promise<void> {
   const now = Date.now();
+  // 1. Sweep session directories under baseDir
+  const entries = await readdir(baseDir, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    if (!entry.isDirectory() || !entry.name.startsWith(RECOVERY_DIR_PREFIX)) {
+    if (!entry.isDirectory()) {
       continue;
     }
-    const path = join(base, entry.name);
-    const info = await stat(path).catch(() => undefined);
-    if (!info || now - info.mtimeMs <= STALE_RECOVERY_DIR_MS) {
-      continue;
+    const sessionDir = join(baseDir, entry.name);
+    let lastActive: number | undefined;
+
+    // Check heartbeat first
+    try {
+      const hb = await readFile(join(sessionDir, "heartbeat"), "utf8");
+      const ts = Number.parseInt(hb.trim(), 10);
+      if (!Number.isNaN(ts)) {
+        lastActive = ts;
+      }
+    } catch {
+      // No heartbeat file
     }
-    await rm(path, { recursive: true, force: true, maxRetries: 1 }).catch(() => undefined);
+
+    // If no heartbeat, check manifest.json
+    if (lastActive === undefined) {
+      try {
+        const raw = await readFile(join(sessionDir, "manifest.json"), "utf8");
+        const manifest = JSON.parse(raw) as Partial<RecoveryManifest>;
+        if (typeof manifest.updatedAt === "number") {
+          lastActive = manifest.updatedAt;
+        }
+      } catch {
+        // No manifest
+      }
+    }
+
+    // Fallback to directory mtime
+    if (lastActive === undefined) {
+      const info = await stat(sessionDir).catch(() => undefined);
+      if (info) {
+        lastActive = info.mtimeMs;
+      }
+    }
+
+    if (lastActive !== undefined && now - lastActive > STALE_RECOVERY_DIR_MS) {
+      await rm(sessionDir, { recursive: true, force: true, maxRetries: 1 }).catch(() => undefined);
+    }
+  }
+
+  // 2. Also sweep any legacy "pi-lcm-recovery-*" directories in tmpdir()
+  const tmp = tmpdir();
+  if (baseDir !== tmp) {
+    const tmpEntries = await readdir(tmp, { withFileTypes: true }).catch(() => []);
+    for (const entry of tmpEntries) {
+      if (!entry.isDirectory() || !entry.name.startsWith(LEGACY_RECOVERY_DIR_PREFIX)) {
+        continue;
+      }
+      const legacyPath = join(tmp, entry.name);
+      const info = await stat(legacyPath).catch(() => undefined);
+      if (info && now - info.mtimeMs > STALE_RECOVERY_DIR_MS) {
+        await rm(legacyPath, { recursive: true, force: true, maxRetries: 1 }).catch(() => undefined);
+      }
+    }
   }
 }
 
 export interface RecoveryStorageOptions {
+  sessionId?: string;
+  baseDirectory?: string;
   maxFiles?: number;
   maxBytes?: number;
-  onDiagnostic?: (message: string, level: "info" | "warning") => void;
+  onDiagnostic?: ((message: string, level: "info" | "warning") => void) | undefined;
 }
 
 export class SessionRecoveryStorage {
+  readonly sessionId: string;
+  readonly baseDirectory: string;
+  private readonly isAnonymous: boolean;
   private directory: string | null = null;
   // Oldest reference first; reading a copy moves it to the back so eviction
   // follows actual use instead of insertion order.
@@ -812,11 +879,22 @@ export class SessionRecoveryStorage {
   private onDiagnostic: ((message: string, level: "info" | "warning") => void) | undefined;
   private prunedCount = 0;
   private fileSeq = 0;
+  private manifestLoaded = false;
 
   constructor(options: RecoveryStorageOptions = {}) {
+    this.isAnonymous = !options.sessionId?.trim();
+    this.sessionId = options.sessionId?.trim() || `anon-${randomUUID().slice(0, 12)}`;
+    this.baseDirectory = options.baseDirectory ?? DEFAULT_BASE_RECOVERY_DIR;
     this.maxFiles = options.maxFiles ?? 50;
     this.maxBytes = options.maxBytes ?? 50 * 1024 * 1024; // 50MB
     this.onDiagnostic = options.onDiagnostic;
+
+    const sessionHash = createHash("sha256").update(this.sessionId).digest("hex").slice(0, 16);
+    const targetDir = join(this.baseDirectory, sessionHash);
+    if (existsSync(targetDir)) {
+      this.directory = targetDir;
+      this.loadManifestSync(targetDir);
+    }
   }
 
   setDiagnostics(onDiagnostic?: (message: string, level: "info" | "warning") => void): void {
@@ -831,7 +909,121 @@ export class SessionRecoveryStorage {
   }
 
   get prunedFileCount(): number {
-    return this.prunedCount;
+    return Math.max(this.prunedCount, this.prunedPaths.size);
+  }
+
+  private loadManifestSync(dir: string): void {
+    const manifestPath = join(dir, "manifest.json");
+    if (!existsSync(manifestPath)) {
+      return;
+    }
+    try {
+      const raw = readFileSync(manifestPath, "utf8");
+      const manifest = JSON.parse(raw) as Partial<RecoveryManifest>;
+      if (manifest && manifest.version === 1) {
+        if (typeof manifest.fileSeq === "number" && manifest.fileSeq > this.fileSeq) {
+          this.fileSeq = manifest.fileSeq;
+        }
+        if (Array.isArray(manifest.prunedPaths)) {
+          for (const p of manifest.prunedPaths) {
+            if (typeof p === "string") {
+              this.rememberPruned(p);
+            }
+          }
+        }
+        if (Array.isArray(manifest.managedFiles)) {
+          for (const entry of manifest.managedFiles) {
+            if (entry && typeof entry.path === "string" && typeof entry.size === "number") {
+              if (existsSync(entry.path)) {
+                if (!this.managedFiles.some((f) => f.path === entry.path)) {
+                  this.managedFiles.push({ path: entry.path, size: entry.size });
+                }
+              } else {
+                this.rememberPruned(entry.path);
+              }
+            }
+          }
+        }
+      }
+      this.manifestLoaded = true;
+    } catch (error) {
+      this.onDiagnostic?.(`could not read recovery manifest: ${describeError(error)}`, "warning");
+    }
+  }
+
+  private async loadManifest(): Promise<void> {
+    if (!this.directory) {
+      return;
+    }
+    this.manifestLoaded = true;
+    const manifestPath = join(this.directory, "manifest.json");
+    try {
+      const raw = await readFile(manifestPath, "utf8");
+      const manifest = JSON.parse(raw) as Partial<RecoveryManifest>;
+      if (manifest && manifest.version === 1) {
+        if (typeof manifest.fileSeq === "number" && manifest.fileSeq > this.fileSeq) {
+          this.fileSeq = manifest.fileSeq;
+        }
+        if (Array.isArray(manifest.prunedPaths)) {
+          for (const p of manifest.prunedPaths) {
+            if (typeof p === "string") {
+              this.rememberPruned(p);
+            }
+          }
+        }
+        if (Array.isArray(manifest.managedFiles)) {
+          for (const entry of manifest.managedFiles) {
+            if (entry && typeof entry.path === "string" && typeof entry.size === "number") {
+              const exists = await stat(entry.path).then(() => true).catch(() => false);
+              if (exists) {
+                if (!this.managedFiles.some((f) => f.path === entry.path)) {
+                  this.managedFiles.push({ path: entry.path, size: entry.size });
+                }
+              } else {
+                this.rememberPruned(entry.path);
+              }
+            }
+          }
+        }
+      }
+    } catch (error) {
+      const isEnoent = (error as NodeJS.ErrnoException)?.code === "ENOENT";
+      if (!isEnoent) {
+        this.onDiagnostic?.(`could not read recovery manifest: ${describeError(error)}`, "warning");
+      }
+    }
+  }
+
+  private async persistManifest(): Promise<void> {
+    if (!this.directory) {
+      return;
+    }
+    const manifestPath = join(this.directory, "manifest.json");
+    const manifest: RecoveryManifest = {
+      version: 1,
+      sessionId: this.sessionId,
+      updatedAt: Date.now(),
+      fileSeq: this.fileSeq,
+      managedFiles: this.managedFiles,
+      prunedPaths: Array.from(this.prunedPaths),
+    };
+    try {
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2), { encoding: "utf8", mode: 0o600 });
+    } catch (error) {
+      this.onDiagnostic?.(`could not save recovery manifest: ${describeError(error)}`, "warning");
+    }
+  }
+
+  private async touchLease(): Promise<void> {
+    if (!this.directory) {
+      return;
+    }
+    const heartbeatPath = join(this.directory, "heartbeat");
+    try {
+      await writeFile(heartbeatPath, String(Date.now()), { encoding: "utf8", mode: 0o600 });
+    } catch {
+      // Non-fatal
+    }
   }
 
   async getDirectory(): Promise<string> {
@@ -840,7 +1032,11 @@ export class SessionRecoveryStorage {
       if (!exists) {
         const lost = this.managedFiles.map((entry) => entry.path);
         this.directory = null;
+        this.manifestLoaded = false;
         this.managedFiles.length = 0;
+        if (this.isAnonymous) {
+          (this as { sessionId: string }).sessionId = `anon-${randomUUID().slice(0, 12)}`;
+        }
         for (const path of lost) {
           this.rememberPruned(path);
         }
@@ -850,18 +1046,30 @@ export class SessionRecoveryStorage {
         );
       }
     }
+
     if (!this.directory) {
       if (!staleSweepStarted) {
         staleSweepStarted = true;
-        void sweepStaleRecoveryDirectories().catch(() => undefined);
+        void sweepStaleRecoveryDirectories(this.baseDirectory).catch(() => undefined);
       }
-      this.directory = await mkdtemp(join(tmpdir(), RECOVERY_DIR_PREFIX));
+
+      const sessionHash = createHash("sha256").update(this.sessionId).digest("hex").slice(0, 16);
+      const targetDir = join(this.baseDirectory, sessionHash);
+
+      await mkdir(targetDir, { recursive: true, mode: 0o700 });
       // POSIX mode bits are a no-op on NTFS, where the directory inherits the
       // temp tree's ACL. The claim that this holds is documented as POSIX-only.
-      await chmod(this.directory, 0o700).catch((error: unknown) => {
+      await chmod(targetDir, 0o700).catch((error: unknown) => {
         this.onDiagnostic?.(`could not restrict the recovery directory: ${describeError(error)}`, "warning");
       });
+
+      this.directory = targetDir;
+      if (!this.manifestLoaded) {
+        await this.loadManifest();
+      }
+      await this.touchLease();
     }
+
     return this.directory;
   }
 
@@ -883,6 +1091,8 @@ export class SessionRecoveryStorage {
       await writeFile(path, buffer, { encoding: "utf8", mode: 0o600 });
       this.managedFiles.push({ path, size: buffer.length });
       await this.prune();
+      await this.persistManifest();
+      await this.touchLease();
       return path;
     } catch (error) {
       this.onDiagnostic?.(`could not save a recovery copy: ${describeError(error)}`, "warning");
@@ -901,6 +1111,7 @@ export class SessionRecoveryStorage {
     if (!haystack) {
       return;
     }
+    let matched = false;
     for (let index = this.managedFiles.length - 1; index >= 0; index--) {
       const entry = this.managedFiles[index];
       if (!haystack.includes(entry.path)) {
@@ -908,6 +1119,11 @@ export class SessionRecoveryStorage {
       }
       this.managedFiles.splice(index, 1);
       this.managedFiles.push(entry);
+      matched = true;
+    }
+    if (matched) {
+      void this.persistManifest().catch(() => undefined);
+      void this.touchLease().catch(() => undefined);
     }
   }
 
@@ -988,6 +1204,7 @@ export class SessionRecoveryStorage {
     if (this.directory) {
       const dir = this.directory;
       this.directory = null;
+      this.manifestLoaded = false;
       const paths = this.managedFiles.map((entry) => entry.path);
       this.managedFiles.length = 0;
       for (const path of paths) {
@@ -1006,27 +1223,91 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-let activeRecoveryStorage = new SessionRecoveryStorage();
+let globalDiagnosticHandler: ((message: string, level: "info" | "warning") => void) | undefined;
+const sessionStorages = new Map<string, SessionRecoveryStorage>();
+let defaultStorage: SessionRecoveryStorage | undefined;
 
-export function getSessionRecoveryStorage(): SessionRecoveryStorage {
-  return activeRecoveryStorage;
+export function getSessionRecoveryStorage(sessionId?: string): SessionRecoveryStorage {
+  const trimmed = sessionId?.trim();
+  if (!trimmed) {
+    if (!defaultStorage) {
+      defaultStorage = new SessionRecoveryStorage({
+        sessionId: "default",
+        onDiagnostic: globalDiagnosticHandler,
+      });
+    }
+    return defaultStorage;
+  }
+  let storage = sessionStorages.get(trimmed);
+  if (!storage) {
+    storage = new SessionRecoveryStorage({
+      sessionId: trimmed,
+      onDiagnostic: globalDiagnosticHandler,
+    });
+    sessionStorages.set(trimmed, storage);
+  }
+  return storage;
 }
 
-export function resetSessionRecoveryStorage(): SessionRecoveryStorage {
-  activeRecoveryStorage = new SessionRecoveryStorage();
-  return activeRecoveryStorage;
+export function resetSessionRecoveryStorage(sessionId?: string): SessionRecoveryStorage {
+  const trimmed = sessionId?.trim();
+  if (trimmed) {
+    sessionStorages.delete(trimmed);
+    const fresh = new SessionRecoveryStorage({
+      sessionId: trimmed,
+      onDiagnostic: globalDiagnosticHandler,
+    });
+    sessionStorages.set(trimmed, fresh);
+    return fresh;
+  }
+  sessionStorages.clear();
+  defaultStorage = new SessionRecoveryStorage({
+    sessionId: "default",
+    onDiagnostic: globalDiagnosticHandler,
+  });
+  return defaultStorage;
 }
 
 export function setRecoveryStorageDiagnostics(
   onDiagnostic?: (message: string, level: "info" | "warning") => void,
+  sessionId?: string,
 ): void {
-  activeRecoveryStorage.setDiagnostics(onDiagnostic);
+  globalDiagnosticHandler = onDiagnostic;
+  if (sessionId?.trim()) {
+    sessionStorages.get(sessionId.trim())?.setDiagnostics(onDiagnostic);
+  } else {
+    defaultStorage?.setDiagnostics(onDiagnostic);
+    for (const storage of sessionStorages.values()) {
+      storage.setDiagnostics(onDiagnostic);
+    }
+  }
 }
 
-export async function cleanupRecoveryStorage(): Promise<void> {
-  await activeRecoveryStorage.cleanup();
+export async function cleanupRecoveryStorage(sessionId?: string): Promise<void> {
+  const trimmed = sessionId?.trim();
+  if (trimmed) {
+    const storage = sessionStorages.get(trimmed);
+    if (storage) {
+      sessionStorages.delete(trimmed);
+      await storage.cleanup();
+    }
+    return;
+  }
+  if (defaultStorage) {
+    await defaultStorage.cleanup();
+    defaultStorage = undefined;
+  }
+  for (const storage of sessionStorages.values()) {
+    await storage.cleanup();
+  }
+  sessionStorages.clear();
 }
 
-export async function saveRecoveryCopy(text: string, toolHint?: string): Promise<string | undefined> {
-  return activeRecoveryStorage.save(text, toolHint);
+export async function saveRecoveryCopy(
+  text: string,
+  toolHint?: string,
+  sessionId?: string,
+): Promise<string | undefined> {
+  return getSessionRecoveryStorage(sessionId).save(text, toolHint);
 }
+
