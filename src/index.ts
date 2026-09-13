@@ -900,7 +900,14 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
 
-    const recoveryStorage = getSessionRecoveryStorage();
+    let currentSessionId: string | undefined;
+    try {
+      currentSessionId = resolveSessionId(context.sessionManager);
+    } catch {
+      currentSessionId = undefined;
+    }
+
+    const recoveryStorage = getSessionRecoveryStorage(currentSessionId);
     // A read of a recovery copy keeps that copy alive through the next eviction,
     // and a failed read of one this session already deleted must say so instead
     // of returning an unexplained ENOENT for a path the transcript still names.
@@ -1116,7 +1123,7 @@ export default function (pi: ExtensionAPI): void {
       `Semantic reset: ${semanticResetStatus}`,
       `Semantic compaction: ${semanticCompactionStatus}`,
       `Reduced outputs since compaction: ${evidenceTracker.reducedSinceLastCompactionCount}`,
-      `Recovery copies pruned: ${getSessionRecoveryStorage().prunedFileCount}`,
+      `Recovery copies pruned: ${getSessionRecoveryStorage(currentSessionId).prunedFileCount}`,
       `Context mode: ${contextModeSummary()}`,
       `Effective thresholds: ${formatThresholdSummary(observed.thresholds)}`,
       `Soft warning: ${observed.thresholds.softWarningTokens.toLocaleString()} tokens`,
