@@ -873,6 +873,13 @@ export class SessionRecoveryStorage {
       const filename = `output-${this.fileSeq}-${safeTool}.txt`;
       const path = join(dir, filename);
       const buffer = Buffer.from(text, "utf8");
+      if (buffer.length > this.maxBytes) {
+        this.onDiagnostic?.(
+          `tool output (${buffer.length} bytes) exceeds recovery storage budget (${this.maxBytes} bytes); cannot save recovery copy`,
+          "warning",
+        );
+        return undefined;
+      }
       await writeFile(path, buffer, { encoding: "utf8", mode: 0o600 });
       this.managedFiles.push({ path, size: buffer.length });
       await this.prune();
@@ -962,7 +969,7 @@ export class SessionRecoveryStorage {
       this.onDiagnostic?.(`recovery copy ${entry.path} is gone; removed from the accounting`, "info");
     }
 
-    while (this.overBudget() && this.managedFiles.length > 1) {
+    while (this.overBudget() && this.managedFiles.length > 0) {
       const oldest = this.managedFiles.shift();
       if (!oldest) {
         break;
@@ -981,7 +988,11 @@ export class SessionRecoveryStorage {
     if (this.directory) {
       const dir = this.directory;
       this.directory = null;
+      const paths = this.managedFiles.map((entry) => entry.path);
       this.managedFiles.length = 0;
+      for (const path of paths) {
+        this.rememberPruned(path);
+      }
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
   }

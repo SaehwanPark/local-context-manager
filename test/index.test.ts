@@ -1,6 +1,8 @@
+import { stat } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import type { CompactOptions, ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import extension from "../src/index.js";
+import { getSessionRecoveryStorage } from "../src/tool-output.js";
 
 type Handler = (event: unknown, context: unknown) => unknown;
 
@@ -527,5 +529,59 @@ describe("extension integration", () => {
     await turnStart?.({}, context);
     await turnEnd?.({}, context);
     expect(compactCalls).toBe(2);
+  });
+
+  it("bypasses custom compaction for overflow compaction and non-semantic threshold compactions", async () => {
+    const harness = makeExtensionHarness();
+    const context = contextWithUsage(35_000, 64_000, compactionHistory());
+    const sessionBeforeCompact = harness.handlers.get("session_before_compact")?.[0];
+    expect(sessionBeforeCompact).toBeDefined();
+
+    // 1. Overflow event: must return undefined unconditionally so Pi recovers natively
+    const overflowResult = await sessionBeforeCompact?.(
+      {
+        reason: "overflow",
+        preparation: { settings: { keepRecentTokens: 20_000 } },
+        branchEntries: [],
+      },
+      context,
+    );
+    expect(overflowResult).toBeUndefined();
+
+    // 2. Proactive threshold compaction without explicit semantic request: must return undefined
+    const thresholdResult = await sessionBeforeCompact?.(
+      {
+        reason: "threshold",
+        preparation: { settings: { keepRecentTokens: 20_000 } },
+        branchEntries: [],
+      },
+      context,
+    );
+    expect(thresholdResult).toBeUndefined();
+  });
+
+  it("preserves recovery copies across session_shutdown (resume/fork lifecycle)", async () => {
+    const harness = makeExtensionHarness();
+    const context = contextWithUsage(10_000, 64_000);
+    const storage = getSessionRecoveryStorage();
+
+    const savedPath = await storage.save("essential tool result to survive across fork/resume", "bash");
+    expect(savedPath).toBeDefined();
+    expect(storage.activeFilesCount).toBeGreaterThan(0);
+
+    const initialStat = await stat(savedPath!);
+    expect(initialStat.isFile()).toBe(true);
+
+    // Simulate session_shutdown (which Pi fires on fork, resume, reload, switch)
+    const sessionShutdown = harness.handlers.get("session_shutdown")?.[0];
+    expect(sessionShutdown).toBeDefined();
+    await sessionShutdown?.({}, context);
+
+    // Storage and files must survive
+    const postShutdownStat = await stat(savedPath!);
+    expect(postShutdownStat.isFile()).toBe(true);
+    expect(storage.activeFilesCount).toBeGreaterThan(0);
+
+    await storage.cleanup();
   });
 });

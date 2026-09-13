@@ -122,7 +122,7 @@ export class EmbeddedContextController implements EmbeddedContextManager {
 
     const thresholds = this.resolveThresholds();
     this.gate.setRearmTokens(getRearmTokens(thresholds.softWarningTokens, thresholds.compactThresholdTokens));
-    this.gate.observe(this.currentTokens);
+    this.gate.observe(this.currentTokens, thresholds.compactThresholdTokens);
 
     try {
       this.host.onStatus?.(this.snapshot());

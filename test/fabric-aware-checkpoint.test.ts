@@ -107,6 +107,7 @@ function makeFabricSnapshot(overrides: Partial<FabricStateSnapshotV1> = {}): Fab
     quiescent,
     state,
     sessionReplacementSafe,
+    rootSessionId: overrides.rootSessionId !== undefined ? overrides.rootSessionId : "sess-123",
     capturedAt: overrides.capturedAt ?? Date.now(),
     runningChildren: 0,
     unresolvedChildTasks: 0,

@@ -29,6 +29,7 @@ import {
   listCheckpointFiles,
   makeCheckpointResetRecord,
   parseResetArguments,
+  publishCheckpoint,
   repositoryIdentifier,
   resolveCheckpointDirectory,
   runCheckpointReset,
@@ -242,6 +243,23 @@ describe("checkpoint storage", () => {
 
       // Second write should still fail with already exists
       await expect(writeCheckpointAtomically(path, "second", mockLink)).rejects.toThrow("already exists");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans up partial file when fallback write fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "local-context-manager-checkpoint-fail-"));
+    const mockLink = vi.fn().mockRejectedValue(
+      Object.assign(new Error("cross-device link not permitted"), { code: "EXDEV" }),
+    );
+    try {
+      const path = join(directory, "failed-fallback.md");
+      const tempPath = join(directory, ".temp.tmp");
+      await expect(
+        publishCheckpoint(tempPath, path, null as unknown as string, mockLink),
+      ).rejects.toThrow();
+      expect(await stat(path).catch(() => null)).toBeNull();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

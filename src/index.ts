@@ -39,7 +39,6 @@ import {
 import {
   appendFullOutputNotice,
   appendPrunedOutputNotice,
-  cleanupRecoveryStorage,
   extractFullOutputPath,
   getSessionRecoveryStorage,
   reduceToolOutput,
@@ -197,7 +196,7 @@ function observeContext(
   const thresholds = resolveThresholds(context, config, telemetry);
   gate.setRearmTokens(getRearmTokens(thresholds.softWarningTokens, thresholds.compactThresholdTokens));
   const snapshot = telemetry.snapshot(thresholds.compactThresholdTokens);
-  gate.observe(snapshot.contextTokens);
+  gate.observe(snapshot.contextTokens, thresholds.compactThresholdTokens);
   updateStatus(context, config, telemetry, thresholds);
   return { tokens: snapshot.contextTokens, thresholds };
 }
@@ -304,6 +303,7 @@ async function buildCustomCompaction(
   const nativeKeepRecentTokens = event.preparation.settings.keepRecentTokens;
   if (
     !config.enabled ||
+    event.reason === "overflow" ||
     !model ||
     !Number.isFinite(nativeKeepRecentTokens) ||
     thresholds.keepRecentTokens >= nativeKeepRecentTokens
@@ -677,7 +677,6 @@ export default function (pi: ExtensionAPI): void {
     semanticRequested = false;
     semanticReason = undefined;
     semanticCompactionDeferredNotified = false;
-    void cleanupRecoveryStorage();
     if (context.hasUI) {
       context.ui.setStatus(EXTENSION_STATUS_KEY, undefined);
     }
@@ -957,6 +956,15 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_before_compact", async (event, context) => {
+    // 1. Overflow compaction: return undefined unconditionally so Pi recovers
+    //    natively without deepening prefill on an already-pressured model.
+    // 2. Threshold/manual compaction: return undefined so Pi's native preparation
+    //    (~20k kept tokens) is used rather than deepening summarization prefill.
+    // 3. Explicit semantic phase compaction: use LCM's custom slice to preserve
+    //    phase boundary instructions and evidence reduction notes.
+    if (event.reason === "overflow" || requestedCompaction?.reason !== "semantic") {
+      return undefined;
+    }
     return buildCustomCompaction(
       event,
       context,
