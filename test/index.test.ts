@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CompactOptions, ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { CompactOptions, ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import extension from "../src/index.js";
 
 type Handler = (event: unknown, context: unknown) => unknown;
@@ -136,6 +136,55 @@ describe("extension integration", () => {
     const turnEnd = harness.handlers.get("turn_end")?.[0];
     await turnEnd?.({}, context);
     expect(compactCalls).toBe(0);
+  });
+
+  it("restores config file thresholds when /context-mode reset is invoked", async () => {
+    const harness = makeExtensionHarness();
+    let compactCalls = 0;
+    const context = contextWithUsage(25_000, 64_000, compactionHistory());
+    context.compact = () => {
+      compactCalls += 1;
+    };
+
+    const modeCommand = harness.commands.get("context-mode")?.handler;
+    expect(modeCommand).toBeDefined();
+
+    await modeCommand?.("aggressive", context);
+
+    await modeCommand?.("reset", context);
+
+    const turnEnd = harness.handlers.get("turn_end")?.[0];
+    await turnEnd?.({}, context);
+    expect(compactCalls).toBe(0);
+  });
+
+  it("reports session override status and recovery prune count in /context-stats", async () => {
+    const harness = makeExtensionHarness();
+    const statsCommand = harness.commands.get("context-stats")?.handler;
+    expect(statsCommand).toBeDefined();
+
+    let notifyMessage = "";
+    const mockContext = {
+      ...contextWithUsage(10_000),
+      hasUI: true,
+      ui: {
+        notify: (msg: string) => {
+          notifyMessage = msg;
+        },
+      },
+    } as unknown as ExtensionCommandContext;
+
+    await statsCommand?.("", mockContext);
+    expect(notifyMessage).toContain("Context mode: balanced (local-context-manager.json)");
+    expect(notifyMessage).toContain("Recovery copies pruned: 0");
+
+    const modeCommand = harness.commands.get("context-mode")?.handler;
+    await modeCommand?.("aggressive", mockContext);
+
+    await statsCommand?.("", mockContext);
+    expect(notifyMessage).toContain(
+      "Context mode: aggressive (session override; /context-mode reset restores local-context-manager.json)",
+    );
   });
 
   it("queues a reset recommendation without switching sessions", async () => {

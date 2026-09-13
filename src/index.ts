@@ -38,10 +38,12 @@ import {
 } from "./telemetry.js";
 import {
   appendFullOutputNotice,
+  appendPrunedOutputNotice,
   cleanupRecoveryStorage,
   extractFullOutputPath,
+  getSessionRecoveryStorage,
   reduceToolOutput,
-  saveRecoveryCopy,
+  setRecoveryStorageDiagnostics,
 } from "./tool-output.js";
 import {
   cleanBoundaryReason,
@@ -61,6 +63,7 @@ import {
 import {
   createEmbeddedContextManager,
   getInteropProvider,
+  getInteropStatus,
   LCM_EMBEDDED_CONTEXT_PROVIDER_NAME,
   queryFabricObservation,
   registerInteropProvider,
@@ -386,10 +389,27 @@ const embeddedContextProvider = Object.freeze({
   createEmbeddedContextManager,
 });
 
-registerInteropProvider(LCM_EMBEDDED_CONTEXT_PROVIDER_NAME, embeddedContextProvider);
+const embeddedProviderRegistration = registerInteropProvider(
+  LCM_EMBEDDED_CONTEXT_PROVIDER_NAME,
+  embeddedContextProvider,
+);
+
+function interopRegistrationProblem(): string | undefined {
+  if (embeddedProviderRegistration) {
+    return undefined;
+  }
+  const status = getInteropStatus();
+  return status.shared
+    ? `${LCM_EMBEDDED_CONTEXT_PROVIDER_NAME} was already registered by another module instance, so that provider stays in place for this process`
+    : `the extension interop registry v${status.publishedVersion} is not understood by local-context-manager, so its providers are invisible to each other`;
+}
 
 export default function (pi: ExtensionAPI): void {
+  // `config` is what every call site reads; `fileConfig` keeps the loaded files
+  // verbatim so a session profile switch can be dropped without a restart.
   let config: LocalContextManagerConfig = { ...DEFAULT_CONFIG };
+  let fileConfig: LocalContextManagerConfig = { ...DEFAULT_CONFIG };
+  let profileOverride: ContextProfile | undefined;
   let pathSettings: PiPathSettings | undefined;
   let telemetry = new ContextTelemetry();
   let gate = new CompactionGate({
@@ -571,7 +591,10 @@ export default function (pi: ExtensionAPI): void {
     if (generation !== sessionGeneration) {
       return;
     }
+    fileConfig = loaded.config;
+    profileOverride = undefined;
     config = loaded.config;
+    setRecoveryStorageDiagnostics((message) => debugLog(config, message));
 
     const branch = context.sessionManager.getBranch();
     seenCompactionIds = new Set(
@@ -635,6 +658,15 @@ export default function (pi: ExtensionAPI): void {
       if (context.hasUI) {
         context.ui.notify(`local-context-manager configuration warning: ${message}`, "warning");
       }
+    }
+
+    // Registration happens at module load, before any context exists to report
+    // through; a lost or shadowed provider is otherwise invisible until a peer
+    // silently fails to find it.
+    const interopProblem = interopRegistrationProblem();
+    if (interopProblem) {
+      debugLog(config, `interop registration: ${interopProblem}`);
+      notifyUI(context, config, `local-context-manager integration warning: ${interopProblem}`, "warning");
     }
   });
 
@@ -858,6 +890,21 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
 
+    const recoveryStorage = getSessionRecoveryStorage();
+    // A read of a recovery copy keeps that copy alive through the next eviction,
+    // and a failed read of one this session already deleted must say so instead
+    // of returning an unexplained ENOENT for a path the transcript still names.
+    recoveryStorage.noteReferences(event.input);
+    if (event.isError) {
+      const pruned = recoveryStorage.findPrunedReferences(event.input);
+      if (pruned.length > 0) {
+        telemetry.recordToolOutput(estimateToolContentTokens(event.content));
+        updateStatus(context, config, telemetry);
+        debugLog(config, `explaining ${pruned.length} pruned recovery reference(s) to a failed tool result`);
+        return { content: appendPrunedOutputNotice(event.content, pruned) };
+      }
+    }
+
     const reduction = reduceToolOutput({
       toolName: event.toolName,
       input: event.input,
@@ -878,7 +925,7 @@ export default function (pi: ExtensionAPI): void {
     let content = reduction.content;
     let fullOutputPath = extractFullOutputPath(event.details, reduction.originalText);
     if (!fullOutputPath) {
-      fullOutputPath = await saveRecoveryCopy(reduction.originalText, event.toolName);
+      fullOutputPath = await recoveryStorage.save(reduction.originalText, event.toolName);
       if (generation !== sessionGeneration) {
         debugLog(config, "ignoring stale tool result after session change");
         return;
@@ -897,7 +944,7 @@ export default function (pi: ExtensionAPI): void {
         (block) => block.type === "text" && block.text.toLowerCase().includes("full output") && block.text.includes(fullOutputPath),
       )
     ) {
-      content = appendFullOutputNotice(content, fullOutputPath);
+      content = appendFullOutputNotice(content, fullOutputPath, recoveryStorage.retentionNote);
     }
 
     telemetry.recordToolReduction(reduction.originalTokens, reduction.retainedTokens);
@@ -984,6 +1031,11 @@ export default function (pi: ExtensionAPI): void {
     },
   });
 
+  const contextModeSummary = (): string =>
+    profileOverride
+      ? `${config.contextProfile} (session override; /context-mode reset restores local-context-manager.json)`
+      : `${config.contextProfile} (local-context-manager.json)`;
+
   const reportContextStats = async (_args: string, context: ExtensionCommandContext) => {
     const observed = observeContext(context, config, telemetry, gate);
     const snapshot = telemetry.snapshot(observed.thresholds.compactThresholdTokens);
@@ -1031,15 +1083,22 @@ export default function (pi: ExtensionAPI): void {
       ? (isFabricUncertainOrBusy ? "deferred by active fabric" : "queued")
       : "none";
 
+    const interopStatus = getInteropStatus();
     const details = [
       formatTelemetryDetails(snapshot),
       `Context source: ${formatTokenSourceDescription(snapshot.tokenSource)}`,
       `Embedded provider: ${embeddedAvailable ? "available" : "unavailable"}`,
+      `Interop registry: ${
+        interopStatus.shared
+          ? `v${interopStatus.publishedVersion} (shared)`
+          : `v${interopStatus.publishedVersion} (not understood; LCM providers are private to this process)`
+      }`,
       `Fabric provider: ${fabricStatus}`,
       `Semantic reset: ${semanticResetStatus}`,
       `Semantic compaction: ${semanticCompactionStatus}`,
       `Reduced outputs since compaction: ${evidenceTracker.reducedSinceLastCompactionCount}`,
-      `Context mode: ${config.contextProfile}`,
+      `Recovery copies pruned: ${getSessionRecoveryStorage().prunedFileCount}`,
+      `Context mode: ${contextModeSummary()}`,
       `Effective thresholds: ${formatThresholdSummary(observed.thresholds)}`,
       `Soft warning: ${observed.thresholds.softWarningTokens.toLocaleString()} tokens`,
       `Hard ceiling: ${observed.thresholds.hardCeilingTokens.toLocaleString()} tokens`,
@@ -1064,16 +1123,44 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("context-mode", {
-    description: "Show or set context mode: aggressive, balanced, or relaxed",
+    description: "Show or set context mode: aggressive, balanced, relaxed, or reset",
     handler: async (args, context) => {
       const requested = args.trim().toLowerCase();
+      const usage = "Usage: /context-mode [aggressive|balanced|relaxed|reset]";
       if (!requested) {
         const observed = observeContext(context, config, telemetry, gate);
         const snapshot = telemetry.snapshot(observed.thresholds.compactThresholdTokens);
         const details = [
-          `Context mode: ${config.contextProfile}`,
+          `Context mode: ${contextModeSummary()}`,
           `Effective thresholds: ${formatThresholdSummary(observed.thresholds)}`,
           `Context window: ${snapshot.contextWindow === null ? "not reported" : `${Math.round(snapshot.contextWindow).toLocaleString()} tokens`}`,
+        ].join("\n");
+        if (context.hasUI) {
+          context.ui.notify(details, "info");
+        } else if (config.debug) {
+          console.error(details);
+        }
+        return;
+      }
+
+      if (requested === "reset" || requested === "config") {
+        if (profileOverride === undefined) {
+          const message = `No session override is active; thresholds already come from local-context-manager.json (${config.contextProfile}).`;
+          if (context.hasUI) {
+            context.ui.notify(message, "info");
+          } else {
+            debugLog(config, message);
+          }
+          return;
+        }
+        profileOverride = undefined;
+        config = { ...fileConfig };
+        warned.value = false;
+        const observed = observeContext(context, config, telemetry, gate);
+        const details = [
+          "Session profile override removed.",
+          `Context mode: ${contextModeSummary()}`,
+          `Effective thresholds: ${formatThresholdSummary(observed.thresholds)}`,
         ].join("\n");
         if (context.hasUI) {
           context.ui.notify(details, "info");
@@ -1086,15 +1173,16 @@ export default function (pi: ExtensionAPI): void {
       const profile = parseContextProfile(requested);
       if (!profile) {
         if (context.hasUI) {
-          context.ui.notify("Usage: /context-mode [aggressive|balanced|relaxed]", "error");
+          context.ui.notify(usage, "error");
         } else {
-          debugLog(config, "Usage: /context-mode [aggressive|balanced|relaxed]");
+          debugLog(config, usage);
         }
         return;
       }
 
+      profileOverride = profile;
       config = {
-        ...config,
+        ...fileConfig,
         contextProfile: profile,
         ...CONTEXT_PROFILE_THRESHOLDS[profile],
       };
@@ -1105,6 +1193,7 @@ export default function (pi: ExtensionAPI): void {
         `Context mode set to ${profile} for this session.`,
         `Effective thresholds: ${formatThresholdSummary(observed.thresholds)}`,
         `Context window: ${snapshot.contextWindow === null ? "not reported" : `${Math.round(snapshot.contextWindow).toLocaleString()} tokens`}`,
+        "Thresholds you set in local-context-manager.json are replaced for this session; /context-mode reset restores them.",
         `To make it persistent, set \"contextProfile\": \"${profile}\" in local-context-manager.json.`,
       ].join("\n");
       if (context.hasUI) {
@@ -1161,7 +1250,7 @@ export default function (pi: ExtensionAPI): void {
       const paths = pathSettings ?? (await getPiPathSettings());
       const state = await getRepositoryState(context.cwd, runPiCommand);
       try {
-        const directory = getCheckpointStorageDirectory(config, paths.agentDir, context.cwd, state);
+        const directory = getCheckpointStorageDirectory(config, paths.agentDir, state);
         const checkpoints = await listCheckpointFiles(directory);
         const details = checkpoints.length === 0
           ? `No checkpoints found for this repository.\nDirectory: ${directory}`
