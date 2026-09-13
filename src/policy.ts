@@ -1,12 +1,16 @@
 export const MIN_COMPACTION_TURN_GAP = 2;
+export const MIN_COMPACTION_GROWTH_MARGIN = 1_500;
 
 export interface CompactionGateOptions {
   rearmTokens: number;
   minimumTurnGap?: number;
+  growthMargin?: number;
 }
 
 /**
- * Keeps threshold compaction one-shot until the active epoch has actually shrunk.
+ * Keeps threshold compaction one-shot until the active epoch has either shrunk
+ * below the rearm watermark, or grown meaningfully in the new post-compaction epoch.
+ * This prevents permanent deactivation when a compaction completes above rearmTokens.
  * Failed requests reopen the gate with a bounded exponential turn backoff so a
  * transient failure can recover without creating a same-turn retry loop.
  * Explicit phase-boundary requests still honor the turn cooldown but can bypass the
@@ -15,27 +19,55 @@ export interface CompactionGateOptions {
 export class CompactionGate {
   private rearmTokens: number;
   private readonly minimumTurnGap: number;
+  private readonly growthMargin: number;
   private armed = true;
   private inFlight = false;
   private lastRequestTurn: number | null = null;
   private failureCount = 0;
   private retryNotBeforeTurn: number | null = null;
+  private postCompactionTokens: number | null = null;
 
   constructor(options: CompactionGateOptions) {
     this.rearmTokens = Number.isFinite(options.rearmTokens) ? Math.max(1, options.rearmTokens) : 1;
     const minimumTurnGap = options.minimumTurnGap ?? MIN_COMPACTION_TURN_GAP;
     this.minimumTurnGap = Number.isFinite(minimumTurnGap) ? Math.max(0, Math.floor(minimumTurnGap)) : MIN_COMPACTION_TURN_GAP;
+    const growthMargin = options.growthMargin ?? MIN_COMPACTION_GROWTH_MARGIN;
+    this.growthMargin = Number.isFinite(growthMargin) ? Math.max(500, Math.floor(growthMargin)) : MIN_COMPACTION_GROWTH_MARGIN;
   }
 
   setRearmTokens(rearmTokens: number): void {
     this.rearmTokens = Number.isFinite(rearmTokens) ? Math.max(1, rearmTokens) : 1;
   }
 
-  observe(tokens: number | null): void {
-    if (tokens !== null && Number.isFinite(tokens) && tokens <= this.rearmTokens) {
+  observe(tokens: number | null, compactThresholdTokens?: number): void {
+    if (tokens === null || !Number.isFinite(tokens)) {
+      return;
+    }
+    // Condition 1: Context fell below the classic watermark
+    if (tokens <= this.rearmTokens) {
       this.armed = true;
       this.failureCount = 0;
       this.retryNotBeforeTurn = null;
+      this.postCompactionTokens = null;
+      return;
+    }
+
+    // Condition 2: Post-compaction epoch growth or threshold re-entry.
+    // If a compaction landed above rearmTokens (e.g. 28k with rearm at 24k),
+    // do not permanently lock out future proactive compactions as context grows.
+    if (!this.armed && this.postCompactionTokens !== null) {
+      const margin = Math.max(this.growthMargin, Math.floor(this.rearmTokens * 0.1));
+      const hasMeaningfulGrowth = tokens >= this.postCompactionTokens + margin;
+      const reachedThreshold =
+        compactThresholdTokens !== undefined &&
+        Number.isFinite(compactThresholdTokens) &&
+        tokens >= compactThresholdTokens;
+
+      if (hasMeaningfulGrowth || reachedThreshold) {
+        this.armed = true;
+        this.failureCount = 0;
+        this.retryNotBeforeTurn = null;
+      }
     }
   }
 
@@ -70,9 +102,14 @@ export class CompactionGate {
     this.inFlight = false;
     this.failureCount = 0;
     this.retryNotBeforeTurn = null;
-    this.observe(postTokens);
+    this.postCompactionTokens = postTokens !== null && Number.isFinite(postTokens) ? postTokens : null;
     if (turn !== undefined && Number.isFinite(turn) && turn >= 0) {
       this.lastRequestTurn = turn;
+    }
+    if (postTokens === null) {
+      this.armed = true;
+    } else {
+      this.observe(postTokens);
     }
   }
 
@@ -91,6 +128,10 @@ export class CompactionGate {
 
   get isInFlight(): boolean {
     return this.inFlight;
+  }
+
+  get isArmed(): boolean {
+    return this.armed;
   }
 }
 

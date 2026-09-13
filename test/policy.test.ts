@@ -28,6 +28,39 @@ describe("compaction policy", () => {
     expect(gate.canRequest(3, false)).toBe(true);
   });
 
+  it("rearms after post-compaction epoch growth when compaction lands above rearmTokens", () => {
+    // Balanced mode: rearmTokens = 24k, threshold = 32k.
+    // Compaction completes at 28k (above 24k rearm watermark).
+    const gate = new CompactionGate({ rearmTokens: 24_000 });
+    gate.request(1);
+    gate.complete(28_000, 1);
+    expect(gate.isArmed).toBe(false);
+    expect(gate.canRequest(2, false)).toBe(false);
+
+    // Monotonically growing context without falling below 24k:
+    // Small increment (28_500) within cooldown or below margin -> remains disarmed
+    gate.observe(28_500, 32_000);
+    expect(gate.isArmed).toBe(false);
+    expect(gate.canRequest(3, false)).toBe(false);
+
+    // Meaningful growth in post-compaction epoch (>= 28k + margin, e.g. 30_500)
+    gate.observe(30_500, 32_000);
+    expect(gate.isArmed).toBe(true);
+    expect(gate.canRequest(3, false)).toBe(true);
+  });
+
+  it("rearms when context re-enters compactThresholdTokens even if postTokens was above rearmTokens", () => {
+    const gate = new CompactionGate({ rearmTokens: 24_000, growthMargin: 10_000 });
+    gate.request(1);
+    gate.complete(29_000, 1);
+    expect(gate.isArmed).toBe(false);
+
+    // Context reaches 32_000 (compactThresholdTokens)
+    gate.observe(32_000, 32_000);
+    expect(gate.isArmed).toBe(true);
+    expect(gate.canRequest(3, false)).toBe(true);
+  });
+
   it("rearms after a failed request with a turn backoff", () => {
     const gate = new CompactionGate({ rearmTokens: 24_000 });
     gate.request(1);

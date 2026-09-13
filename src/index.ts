@@ -197,7 +197,7 @@ function observeContext(
   const thresholds = resolveThresholds(context, config, telemetry);
   gate.setRearmTokens(getRearmTokens(thresholds.softWarningTokens, thresholds.compactThresholdTokens));
   const snapshot = telemetry.snapshot(thresholds.compactThresholdTokens);
-  gate.observe(snapshot.contextTokens);
+  gate.observe(snapshot.contextTokens, thresholds.compactThresholdTokens);
   updateStatus(context, config, telemetry, thresholds);
   return { tokens: snapshot.contextTokens, thresholds };
 }
