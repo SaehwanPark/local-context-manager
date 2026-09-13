@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, chmod, link, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, link, mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import type {
   ExtensionCommandContext,
   SessionEntry,
@@ -216,7 +216,6 @@ function expandHome(value: string): string {
 export function resolveCheckpointDirectory(
   config: LocalContextManagerConfig,
   agentDir: string,
-  cwd: string,
 ): string {
   if (config.checkpointDirectory === null) {
     return join(agentDir, "local-context-manager", "checkpoints");
@@ -227,16 +226,29 @@ export function resolveCheckpointDirectory(
     throw new Error("checkpointDirectory is not a valid path");
   }
   const expanded = expandHome(configured);
-  return normalize(isAbsolute(expanded) ? expanded : resolve(cwd, expanded));
+  // A relative path resolves against the agent dir, never the working tree.
+  // Project-level config is honoured for trusted projects, so a cloned repository
+  // could otherwise point checkpoint archives — conversation summaries and
+  // coordination state — into the repo, where they surface in `git status` and
+  // can be committed.
+  return normalize(isAbsolute(expanded) ? expanded : resolve(agentDir, expanded));
+}
+
+/**
+ * True when `child` sits inside `parent`. Used to warn that archives are about to
+ * be written into the repository the user is about to commit from.
+ */
+export function isPathInside(parent: string, child: string): boolean {
+  const relativePath = relative(normalize(parent), normalize(child));
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
 export function getCheckpointStorageDirectory(
   config: LocalContextManagerConfig,
   agentDir: string,
-  cwd: string,
   state: RepositoryState,
 ): string {
-  return join(resolveCheckpointDirectory(config, agentDir, cwd), repositoryIdentifier(state));
+  return join(resolveCheckpointDirectory(config, agentDir), repositoryIdentifier(state));
 }
 
 function timestampFilenamePart(createdAt: string): string {
@@ -279,7 +291,54 @@ export async function chooseCheckpointPath(
   throw new Error("Could not choose an unused checkpoint filename");
 }
 
-export async function writeCheckpointAtomically(path: string, content: string): Promise<void> {
+// Volumes without hard-link support reject the publish outright rather than
+// degrading: ExFAT, many network mounts, and cloud-synced trees.
+const HARD_LINK_UNSUPPORTED_CODES = new Set(["EPERM", "EOPNOTSUPP", "ENOTSUP", "ENOSYS", "EXDEV", "EINVAL"]);
+
+export async function publishCheckpoint(
+  temporaryPath: string,
+  path: string,
+  content: string,
+  linkFn: (existing: string, newPath: string) => Promise<void> = link,
+): Promise<void> {
+  try {
+    // rename() would replace a file if another reset chose this path first.
+    // A hard link publishes the completed file atomically without clobbering it.
+    await linkFn(temporaryPath, path);
+    await rm(temporaryPath);
+    return;
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") {
+      throw new Error(`Checkpoint already exists: ${path}`);
+    }
+    const code = errorCode(error);
+    if (!code || !HARD_LINK_UNSUPPORTED_CODES.has(code)) {
+      throw error;
+    }
+  }
+
+  // No hard links here. An exclusive create is atomic with respect to creation,
+  // so it keeps the same no-clobber guarantee the hard link was chosen for.
+  await rm(temporaryPath, { force: true }).catch(() => undefined);
+  const handle = await open(path, "wx", 0o600).catch((error: unknown) => {
+    if (errorCode(error) === "EEXIST") {
+      throw new Error(`Checkpoint already exists: ${path}`);
+    }
+    throw error;
+  });
+  try {
+    await handle.writeFile(content, "utf8");
+  } finally {
+    await handle.close();
+  }
+  await chmod(path, 0o600).catch(() => undefined);
+}
+
+export async function writeCheckpointAtomically(
+  path: string,
+  content: string,
+  linkFn: (existing: string, newPath: string) => Promise<void> = link,
+): Promise<void> {
   if (!content.trim()) {
     throw new Error("Checkpoint content is empty");
   }
@@ -288,35 +347,13 @@ export async function writeCheckpointAtomically(path: string, content: string): 
   const temporaryPath = join(directory, `.${basename(path)}.${randomUUID()}.tmp`);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
-
   try {
-    await access(path).then(
-      () => {
-        throw new Error(`Checkpoint already exists: ${path}`);
-      },
-      (error: unknown) => {
-        if (errorCode(error) !== "ENOENT") {
-          throw error;
-        }
-      },
-    );
     await writeFile(temporaryPath, content, {
       encoding: "utf8",
-      flag: "wx",
       mode: 0o600,
     });
     await chmod(temporaryPath, 0o600);
-    try {
-      // rename() would replace a file if another reset chose this path first.
-      // A hard link publishes the completed file atomically without clobbering it.
-      await link(temporaryPath, path);
-    } catch (error) {
-      if (errorCode(error) === "EEXIST") {
-        throw new Error(`Checkpoint already exists: ${path}`);
-      }
-      throw error;
-    }
-    await rm(temporaryPath);
+    await publishCheckpoint(temporaryPath, path, content, linkFn);
   } catch (error) {
     await rm(temporaryPath, { force: true }).catch(() => undefined);
     throw error;
@@ -755,7 +792,13 @@ export async function runCheckpointReset(
   const createdAt = new Date().toISOString();
   let checkpointPath: string;
   try {
-    const directory = getCheckpointStorageDirectory(options.config, options.agentDir, ctx.cwd, repositoryState);
+    const directory = getCheckpointStorageDirectory(options.config, options.agentDir, repositoryState);
+    if (options.config.checkpointDirectory !== null && isPathInside(ctx.cwd, directory)) {
+      ctx.ui.notify(
+        `Checkpoint archives are configured inside the working tree (${directory}). They will appear in git status; an absolute checkpointDirectory outside the repository is safer.`,
+        "warning",
+      );
+    }
     checkpointPath = await chooseCheckpointPath(directory, createdAt, reason);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

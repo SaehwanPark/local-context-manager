@@ -547,7 +547,6 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
       const storage = getCheckpointStorageDirectory(
         { ...DEFAULT_CONFIG, checkpointDirectory: tempDir },
         tempDir,
-        tempDir,
         { workingDirectory: tempDir, repositoryRoot: tempDir, branch: "main", head: "abcdef123", workingTree: "clean" },
       );
       const files = await listCheckpointFiles(storage);
@@ -956,7 +955,6 @@ describe("Fabric-aware Checkpoint and Reset (Scenarios A-E)", () => {
 
       const storage = getCheckpointStorageDirectory(
         { ...DEFAULT_CONFIG, checkpointDirectory: tempDir },
-        tempDir,
         tempDir,
         { workingDirectory: tempDir, repositoryRoot: tempDir, branch: "main", head: "abcdef123", workingTree: "clean" },
       );
