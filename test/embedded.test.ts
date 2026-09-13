@@ -272,8 +272,8 @@ describe("EmbeddedContextManager", () => {
     const textA = (transformedA.content[0] as { text: string }).text;
     const textB = (transformedB.content[0] as { text: string }).text;
 
-    const matchA = textA.match(/Full output saved to: (.*)/);
-    const matchB = textB.match(/Full output saved to: (.*)/);
+    const matchA = textA.match(/Full output saved to:\s*(.*?)(?:\s+\(kept for this session only.*)?$/m);
+    const matchB = textB.match(/Full output saved to:\s*(.*?)(?:\s+\(kept for this session only.*)?$/m);
 
     expect(matchA).toBeDefined();
     expect(matchB).toBeDefined();
@@ -298,7 +298,7 @@ describe("EmbeddedContextManager", () => {
       isError: true,
     });
     const text = (transformed.content[0] as { type: "text"; text: string }).text;
-    const recoveryPath = text.match(/Full output saved to: (.*)/)?.[1];
+    const recoveryPath = text.match(/Full output saved to:\s*(.*?)(?:\s+\(kept for this session only.*)?$/m)?.[1]?.trim();
     expect(recoveryPath).toBeDefined();
 
     manager.deactivate?.();
