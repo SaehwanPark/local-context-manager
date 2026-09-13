@@ -350,5 +350,36 @@ describe("tool-output reduction", () => {
 
     await storage.cleanup();
   });
+
+  it("rejects saving files exceeding maxBytes and records diagnostic", async () => {
+    let diagnosticMessage = "";
+    const storage = new SessionRecoveryStorage({
+      maxBytes: 100,
+      onDiagnostic: (msg) => {
+        diagnosticMessage = msg;
+      },
+    });
+
+    const largeContent = "a".repeat(200);
+    const savedPath = await storage.save(largeContent, "bash");
+    expect(savedPath).toBeUndefined();
+    expect(diagnosticMessage).toContain("exceeds recovery storage budget");
+    expect(storage.activeFilesCount).toBe(0);
+
+    await storage.cleanup();
+  });
+
+  it("records deleted files in prunedPaths upon cleanup for explanation on resume", async () => {
+    const storage = new SessionRecoveryStorage();
+    const savedPath = await storage.save("some output text", "bash");
+    expect(savedPath).toBeDefined();
+    expect(storage.activeFilesCount).toBe(1);
+
+    await storage.cleanup();
+    expect(storage.activeFilesCount).toBe(0);
+
+    const pruned = storage.findPrunedReferences({ command: `cat ${savedPath}` });
+    expect(pruned).toContain(savedPath);
+  });
 });
 
