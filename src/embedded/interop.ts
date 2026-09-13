@@ -405,6 +405,7 @@ function withTimeout<T>(
   timeoutMs: number,
   label: string,
   signal?: AbortSignal,
+  onTimeout?: () => void,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     if (signal?.aborted) {
@@ -418,7 +419,10 @@ function withTimeout<T>(
     };
     const onAbort = () => settle(() => reject(new Error(`${label} aborted`)));
     const timer = setTimeout(
-      () => settle(() => reject(new FabricQueryTimeoutError(`${label} timed out after ${timeoutMs} ms`))),
+      () => settle(() => {
+        onTimeout?.();
+        reject(new FabricQueryTimeoutError(`${label} timed out after ${timeoutMs} ms`));
+      }),
       timeoutMs,
     );
     signal?.addEventListener("abort", onAbort, { once: true });
@@ -459,13 +463,27 @@ export async function queryFabricObservation(
   }
 
   const timeoutMs = options.timeoutMs ?? FABRIC_QUERY_TIMEOUT_MS;
+  const abortController = new AbortController();
+  const callerSignal = request.signal;
+  if (callerSignal?.aborted) {
+    abortController.abort(callerSignal.reason);
+  } else if (callerSignal) {
+    callerSignal.addEventListener("abort", () => abortController.abort(callerSignal.reason), { once: true });
+  }
+
+  const effectiveRequest: FabricSnapshotRequest = {
+    ...request,
+    signal: abortController.signal,
+  };
+
   let rawSnapshot: unknown;
   try {
     rawSnapshot = await withTimeout(
-      Promise.resolve(callProvider(request)),
+      Promise.resolve(callProvider(effectiveRequest)),
       timeoutMs,
       "Fabric state query",
-      request.signal,
+      abortController.signal,
+      () => abortController.abort(new FabricQueryTimeoutError(`Fabric state query timed out after ${timeoutMs} ms`)),
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -512,17 +530,22 @@ export async function queryFabricObservation(
   }
   // Only the destructive claim needs the identity match: a legitimate peer may
   // report the fabric root while a child session asks about quiescence.
-  if (
-    snapshot.sessionReplacementSafe &&
-    request.sessionId &&
-    snapshot.rootSessionId &&
-    snapshot.rootSessionId !== request.sessionId
-  ) {
-    return {
-      kind: "uncertain",
-      reason: `Fabric snapshot claims session replacement is safe but names root session ${JSON.stringify(snapshot.rootSessionId)}`,
-      snapshot,
-    };
+  // For the destructive path, require presence AND equality whenever the caller supplied a session ID.
+  if (snapshot.sessionReplacementSafe && request.sessionId) {
+    if (!snapshot.rootSessionId) {
+      return {
+        kind: "uncertain",
+        reason: `Fabric snapshot claims session replacement is safe but does not identify a rootSessionId to match ${JSON.stringify(request.sessionId)}`,
+        snapshot,
+      };
+    }
+    if (snapshot.rootSessionId !== request.sessionId) {
+      return {
+        kind: "uncertain",
+        reason: `Fabric snapshot claims session replacement is safe but names root session ${JSON.stringify(snapshot.rootSessionId)}`,
+        snapshot,
+      };
+    }
   }
 
   return { kind: "known", snapshot };

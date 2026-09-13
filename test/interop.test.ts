@@ -180,6 +180,7 @@ describe("process-local extension interop registry and safe-agent V1 contract", 
       quiescent: true,
       state: "known",
       sessionReplacementSafe: true,
+      rootSessionId: "valid-session-id",
       capturedAt: Date.now(),
       runningChildren: 0,
       unresolvedChildTasks: 0,
@@ -369,5 +370,48 @@ describe("process-local extension interop registry and safe-agent V1 contract", 
     if (obs.kind === "uncertain") {
       expect(obs.reason).toContain("foreign-session-123");
     }
+  });
+
+  it("rejects session replacement when rootSessionId is omitted and sessionId is provided", async () => {
+    const noRootSnapshot: FabricStateSnapshotV1 = {
+      version: 1,
+      active: true,
+      quiescent: true,
+      state: "known",
+      sessionReplacementSafe: true,
+      capturedAt: Date.now(),
+      runningChildren: 0,
+      unresolvedChildTasks: 0,
+      mutableHolds: 0,
+      activeWriteFences: 0,
+      pendingRootRequests: 0,
+      pendingRootDeliveries: 0,
+      quiescenceReasons: [],
+    };
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
+      getSnapshot: vi.fn().mockResolvedValue(noRootSnapshot),
+    });
+
+    const obs = await queryFabricObservation({ cwd: "/repo", sessionId: "my-session-123" });
+    expect(obs.kind).toBe("uncertain");
+    if (obs.kind === "uncertain") {
+      expect(obs.reason).toContain("does not identify a rootSessionId");
+    }
+  });
+
+  it("aborts the request signal passed to the provider on timeout", async () => {
+    let receivedSignal: AbortSignal | undefined;
+    const provider = {
+      getSnapshot: (req: FabricSnapshotRequest) => {
+        receivedSignal = req.signal;
+        return new Promise<never>(() => {});
+      },
+    };
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, provider);
+
+    const obs = await queryFabricObservation({ cwd: "/repo" }, { timeoutMs: 50 });
+    expect(obs.kind).toBe("uncertain");
+    expect(receivedSignal).toBeDefined();
+    expect(receivedSignal?.aborted).toBe(true);
   });
 });

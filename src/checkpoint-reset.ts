@@ -327,9 +327,14 @@ export async function publishCheckpoint(
     throw error;
   });
   try {
-    await handle.writeFile(content, "utf8");
-  } finally {
-    await handle.close();
+    try {
+      await handle.writeFile(content, "utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch (writeError) {
+    await rm(path, { force: true }).catch(() => undefined);
+    throw writeError;
   }
   await chmod(path, 0o600).catch(() => undefined);
 }
