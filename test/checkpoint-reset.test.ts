@@ -25,6 +25,7 @@ import {
   getCheckpointStorageDirectory,
   getLatestCheckpointResetRecord,
   getRepositoryState,
+  isPathInside,
   listCheckpointFiles,
   makeCheckpointResetRecord,
   parseResetArguments,
@@ -151,11 +152,11 @@ describe("checkpoint storage", () => {
     const directory = await mkdtemp(join(tmpdir(), "local-context-manager-checkpoint-test-"));
     try {
       const state = { ...repositoryState, repositoryRoot: "/private/repository/path" };
-      const storage = getCheckpointStorageDirectory(DEFAULT_CONFIG, directory, "/private/repository/path", state);
+      const storage = getCheckpointStorageDirectory(DEFAULT_CONFIG, directory, state);
       expect(storage).toContain(join(directory, "local-context-manager", "checkpoints"));
       expect(storage).not.toContain("/private/repository/path");
       expect(repositoryIdentifier(state)).toMatch(/^repo-[a-f0-9]{16}$/);
-      expect(resolveCheckpointDirectory(DEFAULT_CONFIG, directory, state.workingDirectory)).toContain(
+      expect(resolveCheckpointDirectory(DEFAULT_CONFIG, directory)).toContain(
         join(directory, "local-context-manager", "checkpoints"),
       );
 
@@ -205,6 +206,42 @@ describe("checkpoint storage", () => {
       expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
       expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
       expect(["first", "second"]).toContain(await readFile(path, "utf8"));
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves relative checkpoint directory against agentDir instead of cwd", () => {
+    const agentDir = join(tmpdir(), "pi-agent");
+    const resolved = resolveCheckpointDirectory(
+      { ...DEFAULT_CONFIG, checkpointDirectory: "relative-checkpoints" },
+      agentDir,
+    );
+    expect(resolved).toBe(join(agentDir, "relative-checkpoints"));
+  });
+
+  it("detects when a path sits inside another directory with isPathInside", () => {
+    const parent = join(tmpdir(), "repo");
+    const inside = join(parent, "checkpoints", "nested");
+    const outside = join(tmpdir(), "other-repo");
+    expect(isPathInside(parent, inside)).toBe(true);
+    expect(isPathInside(parent, parent)).toBe(true);
+    expect(isPathInside(parent, outside)).toBe(false);
+  });
+
+  it("falls back to atomic exclusive file creation when hard links are unsupported (e.g. EXDEV)", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "local-context-manager-checkpoint-test-"));
+    const mockLink = vi.fn().mockRejectedValue(
+      Object.assign(new Error("cross-device link not permitted"), { code: "EXDEV" }),
+    );
+    try {
+      const path = join(directory, "fallback.md");
+      await writeCheckpointAtomically(path, "fallback content", mockLink);
+      expect(await readFile(path, "utf8")).toBe("fallback content");
+      expect(mockLink).toHaveBeenCalled();
+
+      // Second write should still fail with already exists
+      await expect(writeCheckpointAtomically(path, "second", mockLink)).rejects.toThrow("already exists");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -336,7 +373,6 @@ describe("reset transaction", () => {
         getCheckpointStorageDirectory(
           { ...DEFAULT_CONFIG, checkpointDirectory: directory },
           directory,
-          directory,
           { workingDirectory: directory, repositoryRoot: directory, branch: "main", head: "abcdef", workingTree: "clean" },
         ),
       );
@@ -366,7 +402,6 @@ describe("reset transaction", () => {
       const storage = getCheckpointStorageDirectory(
         { ...DEFAULT_CONFIG, checkpointDirectory: directory },
         directory,
-        directory,
         { workingDirectory: directory, repositoryRoot: directory, workingTree: "unknown" },
       );
       expect(await listCheckpointFiles(storage)).toHaveLength(1);
@@ -391,7 +426,6 @@ describe("reset transaction", () => {
       expect((context.newSession as unknown as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
       const storage = getCheckpointStorageDirectory(
         { ...DEFAULT_CONFIG, checkpointDirectory: directory },
-        directory,
         directory,
         { workingDirectory: directory, repositoryRoot: directory, workingTree: "unknown" },
       );

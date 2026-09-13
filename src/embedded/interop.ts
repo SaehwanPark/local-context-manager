@@ -14,6 +14,11 @@ export const SAFE_AGENT_FABRIC_PROVIDER_NAME = "safe-agent-team.fabric-state.v1"
 export interface FabricSnapshotRequest {
   cwd: string;
   sessionId?: string;
+  /**
+   * Optional cancellation for the provider call. Providers that support it can
+   * stop broker work early; LCM bounds the wait either way.
+   */
+  signal?: AbortSignal;
 }
 
 export interface FabricTaskSnapshot {
@@ -107,31 +112,88 @@ export function resolveSessionFile(sessionManager: unknown): string | undefined 
   return undefined;
 }
 
-export function getInteropRegistry(): PiExtensionInteropRegistryV1 {
-  const globalObj = globalThis as unknown as Record<symbol, PiExtensionInteropRegistryV1 | undefined>;
-  let registry = globalObj[PI_EXTENSION_INTEROP];
-  if (!registry || typeof registry !== "object" || registry.version !== 1 || !(registry.providers instanceof Map)) {
-    registry = {
-      version: 1,
-      providers: new Map<string, unknown>(),
-    };
+interface RegistryView {
+  registry: PiExtensionInteropRegistryV1;
+  /** False when the published registry belongs to a peer protocol LCM does not understand. */
+  shared: boolean;
+  publishedVersion: number | null;
+}
+
+// Handed out when a foreign registry occupies the shared symbol, so LCM keeps
+// working inside its own module graph without destroying the peer's state.
+let privateRegistry: PiExtensionInteropRegistryV1 | undefined;
+
+function createRegistry(): PiExtensionInteropRegistryV1 {
+  return { version: 1, providers: new Map<string, unknown>() };
+}
+
+function registryView(): RegistryView {
+  const globalObj = globalThis as unknown as Record<symbol, unknown>;
+  const published = globalObj[PI_EXTENSION_INTEROP];
+
+  if (published === undefined || published === null) {
+    const registry = createRegistry();
     globalObj[PI_EXTENSION_INTEROP] = registry;
+    return { registry, shared: true, publishedVersion: 1 };
   }
-  return registry;
+
+  const record =
+    typeof published === "object" && published !== null
+      ? (published as { version?: unknown; providers?: unknown })
+      : undefined;
+  const version =
+    typeof record?.version === "number" && Number.isFinite(record.version) ? record.version : null;
+
+  if (version !== null && version !== 1) {
+    // A well-formed foreign registry is another extension's object. Replacing it
+    // would leave both extensions holding private, diverging registries, and the
+    // resulting "absent" answer would read as "nothing to protect" on the
+    // destructive path. Keep it and fail closed instead.
+    privateRegistry ??= createRegistry();
+    return { registry: privateRegistry, shared: false, publishedVersion: version };
+  }
+
+  if (version === 1 && record?.providers instanceof Map) {
+    return {
+      registry: published as PiExtensionInteropRegistryV1,
+      shared: true,
+      publishedVersion: 1,
+    };
+  }
+
+  // Unversioned or malformed: there is no peer state worth preserving.
+  const registry = createRegistry();
+  globalObj[PI_EXTENSION_INTEROP] = registry;
+  return { registry, shared: true, publishedVersion: 1 };
+}
+
+export function getInteropRegistry(): PiExtensionInteropRegistryV1 {
+  return registryView().registry;
+}
+
+/**
+ * Whether LCM's provider table is the one peers can see, plus the version it
+ * found. Reported by `/context-stats` so a silent protocol mismatch is diagnosable.
+ */
+export function getInteropStatus(): { publishedVersion: number | null; shared: boolean } {
+  const view = registryView();
+  return { publishedVersion: view.publishedVersion, shared: view.shared };
 }
 
 export function registerInteropProvider(name: string, provider: unknown): boolean {
   if (!name || provider === undefined || provider === null) {
     return false;
   }
-  const registry = getInteropRegistry();
-  const existing = registry.providers.get(name);
+  const view = registryView();
+  const existing = view.registry.providers.get(name);
   if (existing !== undefined && existing !== provider) {
     // Incompatible duplicate provider detected
     return false;
   }
-  registry.providers.set(name, provider);
-  return true;
+  view.registry.providers.set(name, provider);
+  // Registration is recorded locally, but a foreign registry means no peer can
+  // observe it, which callers must report rather than assume succeeded.
+  return view.shared;
 }
 
 export function registerEmbeddedContextManagerProvider(
@@ -317,9 +379,68 @@ export function sanitizeFabricSnapshot(raw: unknown): FabricStateSnapshotV1 | un
   return result;
 }
 
+export const FABRIC_QUERY_TIMEOUT_MS = 2_000;
+// Deliberately generous. A peer may serve a cached projection, and a false
+// "stale" only defers a recommendation, while trusting a projection that is
+// actually old enough to have missed the whole child lifecycle would not.
+export const FABRIC_SNAPSHOT_MAX_AGE_MS = 60_000;
+export const FABRIC_SNAPSHOT_FUTURE_TOLERANCE_MS = 5_000;
+
+export interface FabricQueryOptions {
+  timeoutMs?: number;
+  maxSnapshotAgeMs?: number;
+  futureToleranceMs?: number;
+  now?: () => number;
+}
+
+class FabricQueryTimeoutError extends Error {}
+
+/**
+ * Providers are other extensions' code and can hang; an unbounded await here
+ * keeps the root session from becoming idle, which also stalls LCM's own
+ * settled-boundary work. `catch` alone cannot help a promise that never settles.
+ */
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error(`${label} aborted`));
+      return;
+    }
+    const settle = (fn: () => void) => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      fn();
+    };
+    const onAbort = () => settle(() => reject(new Error(`${label} aborted`)));
+    const timer = setTimeout(
+      () => settle(() => reject(new FabricQueryTimeoutError(`${label} timed out after ${timeoutMs} ms`))),
+      timeoutMs,
+    );
+    signal?.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => settle(() => resolve(value)),
+      (error) => settle(() => reject(error)),
+    );
+  });
+}
+
 export async function queryFabricObservation(
   request: FabricSnapshotRequest,
+  options: FabricQueryOptions = {},
 ): Promise<FabricObservation> {
+  const status = getInteropStatus();
+  if (!status.shared) {
+    return {
+      kind: "uncertain",
+      reason: `Extension interop registry v${status.publishedVersion} is not understood by local-context-manager, so fabric state cannot be verified`,
+    };
+  }
+
   const provider = getInteropProvider<FabricStateProviderV1 | FabricStateProviderFunction>(
     SAFE_AGENT_FABRIC_PROVIDER_NAME,
   );
@@ -327,44 +448,91 @@ export async function queryFabricObservation(
     return { kind: "absent" };
   }
 
+  const callProvider: ((request: FabricSnapshotRequest) => unknown) | undefined =
+    typeof (provider as FabricStateProviderV1).getSnapshot === "function"
+      ? (request: FabricSnapshotRequest) => (provider as FabricStateProviderV1).getSnapshot!(request)
+      : typeof provider === "function"
+        ? (request: FabricSnapshotRequest) => (provider as FabricStateProviderFunction)(request)
+        : undefined;
+  if (!callProvider) {
+    return { kind: "uncertain", reason: "Fabric provider has no callable getSnapshot method" };
+  }
+
+  const timeoutMs = options.timeoutMs ?? FABRIC_QUERY_TIMEOUT_MS;
+  let rawSnapshot: unknown;
   try {
-    let rawSnapshot: unknown;
-    if (typeof (provider as FabricStateProviderV1).getSnapshot === "function") {
-      rawSnapshot = await (provider as FabricStateProviderV1).getSnapshot!(request);
-    } else if (typeof provider === "function") {
-      rawSnapshot = await (provider as FabricStateProviderFunction)(request);
-    } else {
-      return { kind: "uncertain", reason: "Fabric provider has no callable getSnapshot method" };
-    }
-
-    if (rawSnapshot === null || rawSnapshot === undefined) {
-      return { kind: "uncertain", reason: "Fabric provider returned null or undefined snapshot" };
-    }
-
-    const snapshot = sanitizeFabricSnapshot(rawSnapshot);
-    if (!snapshot) {
-      return { kind: "uncertain", reason: "Fabric provider returned malformed or incompatible snapshot" };
-    }
-
-    if (snapshot.state === "uncertain") {
-      const reason =
-        snapshot.quiescenceReasons && snapshot.quiescenceReasons.length > 0
-          ? snapshot.quiescenceReasons.join(", ")
-          : "Fabric provider reported uncertain state";
-      return { kind: "uncertain", reason, snapshot };
-    }
-
-    return { kind: "known", snapshot };
+    rawSnapshot = await withTimeout(
+      Promise.resolve(callProvider(request)),
+      timeoutMs,
+      "Fabric state query",
+      request.signal,
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { kind: "uncertain", reason: `Fabric query threw error: ${message}` };
+    return {
+      kind: "uncertain",
+      reason: error instanceof FabricQueryTimeoutError ? message : `Fabric query threw error: ${message}`,
+    };
   }
+
+  if (rawSnapshot === null || rawSnapshot === undefined) {
+    return { kind: "uncertain", reason: "Fabric provider returned null or undefined snapshot" };
+  }
+
+  const snapshot = sanitizeFabricSnapshot(rawSnapshot);
+  if (!snapshot) {
+    return { kind: "uncertain", reason: "Fabric provider returned malformed or incompatible snapshot" };
+  }
+
+  if (snapshot.state === "uncertain") {
+    const reason =
+      snapshot.quiescenceReasons && snapshot.quiescenceReasons.length > 0
+        ? snapshot.quiescenceReasons.join(", ")
+        : "Fabric provider reported uncertain state";
+    return { kind: "uncertain", reason, snapshot };
+  }
+
+  const now = (options.now ?? Date.now)();
+  const maxAgeMs = options.maxSnapshotAgeMs ?? FABRIC_SNAPSHOT_MAX_AGE_MS;
+  const futureToleranceMs = options.futureToleranceMs ?? FABRIC_SNAPSHOT_FUTURE_TOLERANCE_MS;
+  const ageMs = now - snapshot.capturedAt;
+  if (ageMs < -futureToleranceMs) {
+    return {
+      kind: "uncertain",
+      reason: `Fabric snapshot is dated ${Math.round(-ageMs / 1000)}s in the future`,
+      snapshot,
+    };
+  }
+  if (ageMs > maxAgeMs) {
+    return {
+      kind: "uncertain",
+      reason: `Fabric snapshot is stale (captured ${Math.round(ageMs / 1000)}s ago; limit ${Math.round(maxAgeMs / 1000)}s)`,
+      snapshot,
+    };
+  }
+  // Only the destructive claim needs the identity match: a legitimate peer may
+  // report the fabric root while a child session asks about quiescence.
+  if (
+    snapshot.sessionReplacementSafe &&
+    request.sessionId &&
+    snapshot.rootSessionId &&
+    snapshot.rootSessionId !== request.sessionId
+  ) {
+    return {
+      kind: "uncertain",
+      reason: `Fabric snapshot claims session replacement is safe but names root session ${JSON.stringify(snapshot.rootSessionId)}`,
+      snapshot,
+    };
+  }
+
+  return { kind: "known", snapshot };
 }
 
 export async function queryFabricState(
   request: FabricSnapshotRequest,
+  options: FabricQueryOptions = {},
 ): Promise<FabricStateSnapshotV1 | undefined> {
-  const observation = await queryFabricObservation(request);
+  const observation = await queryFabricObservation(request, options);
   if (observation.kind === "known" || observation.kind === "uncertain") {
     return observation.snapshot;
   }

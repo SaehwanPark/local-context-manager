@@ -12,6 +12,7 @@ import { CompactionGate, getRearmTokens, shouldTriggerThresholdCompaction } from
 import { estimateActiveContextTokens } from "../session-utils.js";
 import {
   appendFullOutputNotice,
+  appendPrunedOutputNotice,
   extractFullOutputPath,
   reduceToolOutput,
   SessionRecoveryStorage,
@@ -50,7 +51,9 @@ export class EmbeddedContextController implements EmbeddedContextManager {
       this.recoveryStorage = options.recoveryStorage;
       this.ownsRecoveryStorage = false;
     } else {
-      this.recoveryStorage = new SessionRecoveryStorage();
+      this.recoveryStorage = new SessionRecoveryStorage({
+        onDiagnostic: (message) => this.host.onDiagnostic?.({ level: "warning", message }),
+      });
       this.ownsRecoveryStorage = true;
     }
 
@@ -187,6 +190,14 @@ export class EmbeddedContextController implements EmbeddedContextManager {
       return result;
     }
 
+    this.recoveryStorage.noteReferences(result.input);
+    if (result.isError) {
+      const pruned = this.recoveryStorage.findPrunedReferences(result.input);
+      if (pruned.length > 0) {
+        return { ...result, content: appendPrunedOutputNotice(result.content, pruned) };
+      }
+    }
+
     let reduction;
     try {
       reduction = reduceToolOutput({
@@ -245,7 +256,7 @@ export class EmbeddedContextController implements EmbeddedContextManager {
           block.text.includes(fullOutputPath),
       )
     ) {
-      content = appendFullOutputNotice(content, fullOutputPath);
+      content = appendFullOutputNotice(content, fullOutputPath, this.recoveryStorage.retentionNote);
     }
 
     try {

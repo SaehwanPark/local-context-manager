@@ -4,8 +4,10 @@ import {
   FabricStateSnapshotV1,
   getInteropProvider,
   getInteropRegistry,
+  getInteropStatus,
   isFabricQuiescent,
   isSessionReplacementSafe,
+  PI_EXTENSION_INTEROP,
   queryFabricObservation,
   queryFabricState,
   registerInteropProvider,
@@ -178,7 +180,7 @@ describe("process-local extension interop registry and safe-agent V1 contract", 
       quiescent: true,
       state: "known",
       sessionReplacementSafe: true,
-      capturedAt: 1725800000000,
+      capturedAt: Date.now(),
       runningChildren: 0,
       unresolvedChildTasks: 0,
       mutableHolds: 0,
@@ -252,5 +254,120 @@ describe("process-local extension interop registry and safe-agent V1 contract", 
       expect(obs.reason).toContain("Fabric internal failure");
     }
     expect(isSessionReplacementSafe(obs)).toBe(false);
+  });
+
+  it("times out a hanging fabric provider and returns uncertain", async () => {
+    const hangingProvider = {
+      getSnapshot: () => new Promise<never>(() => {}),
+    };
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, hangingProvider);
+
+    const obs = await queryFabricObservation({ cwd: "/repo" }, { timeoutMs: 50 });
+    expect(obs.kind).toBe("uncertain");
+    if (obs.kind === "uncertain") {
+      expect(obs.reason).toContain("timed out after 50 ms");
+    }
+  });
+
+  it("aborts fabric provider query when request signal is aborted", async () => {
+    const controller = new AbortController();
+    const hangingProvider = {
+      getSnapshot: () => new Promise<never>(() => {}),
+    };
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, hangingProvider);
+
+    controller.abort();
+    const obs = await queryFabricObservation({ cwd: "/repo", signal: controller.signal }, { timeoutMs: 2_000 });
+    expect(obs.kind).toBe("uncertain");
+    if (obs.kind === "uncertain") {
+      expect(obs.reason).toContain("aborted");
+    }
+  });
+
+  it("preserves foreign interop registry without overwriting it and returns uncertain", async () => {
+    const globalObj = globalThis as unknown as Record<symbol, unknown>;
+    const originalRegistry = globalObj[PI_EXTENSION_INTEROP];
+    try {
+      const foreignV2Registry = { version: 2, providers: new Map<string, unknown>() };
+      globalObj[PI_EXTENSION_INTEROP] = foreignV2Registry;
+
+      const status = getInteropStatus();
+      expect(status.shared).toBe(false);
+      expect(status.publishedVersion).toBe(2);
+
+      expect(globalObj[PI_EXTENSION_INTEROP]).toBe(foreignV2Registry);
+
+      const obs = await queryFabricObservation({ cwd: "/repo" });
+      expect(obs.kind).toBe("uncertain");
+      expect(isSessionReplacementSafe(obs)).toBe(false);
+    } finally {
+      globalObj[PI_EXTENSION_INTEROP] = originalRegistry;
+    }
+  });
+
+  it("rejects stale and future snapshots as uncertain", async () => {
+    const staleSnapshot: FabricStateSnapshotV1 = {
+      version: 1,
+      active: true,
+      quiescent: true,
+      state: "known",
+      sessionReplacementSafe: true,
+      capturedAt: Date.now() - 120_000,
+      runningChildren: 0,
+      unresolvedChildTasks: 0,
+      mutableHolds: 0,
+      activeWriteFences: 0,
+      pendingRootRequests: 0,
+      pendingRootDeliveries: 0,
+      quiescenceReasons: [],
+    };
+    const getSnapshot = vi.fn().mockResolvedValue(staleSnapshot);
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, { getSnapshot });
+
+    const obsStale = await queryFabricObservation({ cwd: "/repo" });
+    expect(obsStale.kind).toBe("uncertain");
+    if (obsStale.kind === "uncertain") {
+      expect(obsStale.reason).toContain("stale");
+    }
+
+    const futureSnapshot: FabricStateSnapshotV1 = {
+      ...staleSnapshot,
+      capturedAt: Date.now() + 60_000,
+    };
+    getSnapshot.mockResolvedValue(futureSnapshot);
+
+    const obsFuture = await queryFabricObservation({ cwd: "/repo" });
+    expect(obsFuture.kind).toBe("uncertain");
+    if (obsFuture.kind === "uncertain") {
+      expect(obsFuture.reason).toContain("future");
+    }
+  });
+
+  it("rejects session replacement when rootSessionId mismatches current session", async () => {
+    const foreignRootSnapshot: FabricStateSnapshotV1 = {
+      version: 1,
+      active: true,
+      quiescent: true,
+      state: "known",
+      sessionReplacementSafe: true,
+      rootSessionId: "foreign-session-123",
+      capturedAt: Date.now(),
+      runningChildren: 0,
+      unresolvedChildTasks: 0,
+      mutableHolds: 0,
+      activeWriteFences: 0,
+      pendingRootRequests: 0,
+      pendingRootDeliveries: 0,
+      quiescenceReasons: [],
+    };
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, {
+      getSnapshot: vi.fn().mockResolvedValue(foreignRootSnapshot),
+    });
+
+    const obs = await queryFabricObservation({ cwd: "/repo", sessionId: "my-session-456" });
+    expect(obs.kind).toBe("uncertain");
+    if (obs.kind === "uncertain") {
+      expect(obs.reason).toContain("foreign-session-123");
+    }
   });
 });
