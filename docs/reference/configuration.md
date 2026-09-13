@@ -55,7 +55,7 @@ After editing a file, start a new Pi session or run `/reload`.
 | `softWarningTokens` | `24000` | Advanced override for the warning boundary after a compaction cycle. |
 | `compactThresholdTokens` | `32000` | Advanced override for a guarded proactive compaction request at an idle boundary. |
 | `hardCeilingTokens` | `48000` | Advanced override for the status boundary; Pi still owns emergency compaction. |
-| `keepRecentTokens` | `10000` | Advanced override for the recent-context target used by the extension's compaction hook when Pi's native helpers allow it. |
+| `keepRecentTokens` | `10000` | Advanced override for the recent-context target used during explicit semantic deep compaction. Routine proactive and overflow compactions deliberately preserve Pi's native preparation. |
 | `toolOutputReduction` | `true` | Allows reduction of eligible newly arriving oversized tool results. |
 | `semanticCompaction` | `true` | Enables `request_context_compaction` and `/compact-phase`. |
 | `handoff` | `true` | Enables `/handoff <objective>`. |
@@ -151,7 +151,7 @@ With `checkpointDirectory: null`, archives are stored under:
 <agent-dir>/local-context-manager/checkpoints/<repository-hash>/<timestamp>-<reason>.md
 ```
 
-The default agent directory is `~/.pi/agent`. A configured path can be absolute or relative; relative paths resolve from the current project. The extension still separates repositories with a non-reversible repository hash.
+The default agent directory is `~/.pi/agent`. A configured path can be absolute or relative; relative paths resolve from the Pi agent directory, never the working tree (protecting repositories from accidental checkpoint commits). The extension still separates repositories with a non-reversible repository hash.
 
 Checkpoint files are local agent state. They may contain project paths, decisions, test results, and model-generated text. The extension creates them atomically with restrictive permissions, but your filesystem and backup tools still determine who can read them. Do not commit them by accident.
 
