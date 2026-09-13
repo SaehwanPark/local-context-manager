@@ -1,8 +1,13 @@
 import { stat } from "node:fs/promises";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CompactOptions, ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import extension from "../src/index.js";
 import { getSessionRecoveryStorage } from "../src/tool-output.js";
+import {
+  getInteropRegistry,
+  registerInteropProvider,
+  SAFE_AGENT_FABRIC_PROVIDER_NAME,
+} from "../src/embedded/interop.js";
 
 type Handler = (event: unknown, context: unknown) => unknown;
 
@@ -583,5 +588,121 @@ describe("extension integration", () => {
     expect(storage.activeFilesCount).toBeGreaterThan(0);
 
     await storage.cleanup();
+  });
+
+  it("does not consume semanticRequested upon an unrelated threshold or auto compaction", async () => {
+    const harness = makeExtensionHarness();
+    const context = contextWithUsage(35_000, 64_000, compactionHistory());
+
+    const sessionStart = harness.handlers.get("session_start")?.[0];
+    await sessionStart?.({}, context);
+
+    // Request semantic compaction
+    const compactionTool = harness.tools.find((t) => t.name === "request_context_compaction");
+    await (compactionTool?.execute as any)("call-1", { reason: "Refactored module X" });
+
+    // An unrelated auto/threshold compaction completes
+    const sessionCompact = harness.handlers.get("session_compact")?.[0];
+    await sessionCompact?.(
+      {
+        compactionEntry: {
+          type: "compaction",
+          id: "comp-auto-1",
+          parentId: null,
+          summary: "auto threshold summary",
+          firstKeptEntryId: "kept-1",
+          tokensBefore: 35_000,
+          timestamp: new Date().toISOString(),
+        },
+        reason: "threshold",
+      },
+      contextWithUsage(20_000, 64_000, compactionHistory()),
+    );
+
+    // Settled boundary should still schedule the semantic compaction because it was not consumed
+    let compactReason: string | undefined;
+    const settledContext = contextWithUsage(20_000, 64_000, compactionHistory());
+    settledContext.compact = (options: any) => {
+      compactReason = options?.customInstructions;
+    };
+
+    const turnStart = harness.handlers.get("turn_start")?.[0];
+    await turnStart?.({}, settledContext);
+    await turnStart?.({}, settledContext);
+
+    const agentSettled = harness.handlers.get("agent_settled")?.[0];
+    await agentSettled?.({}, settledContext);
+    await flushImmediate();
+
+    expect(compactReason).toBeDefined();
+    expect(compactReason).toContain("Refactored module X");
+  });
+
+  it("skips fabric query in agent_settled when neither semantic compaction nor checkpoint reset is pending", async () => {
+    const registry = getInteropRegistry();
+    registry.providers.clear();
+
+    const getSnapshot = vi.fn().mockResolvedValue({
+      version: 1,
+      active: false,
+      quiescent: true,
+      state: "known",
+      sessionReplacementSafe: true,
+      capturedAt: Date.now(),
+      runningChildren: 0,
+      unresolvedChildTasks: 0,
+      mutableHolds: 0,
+      activeWriteFences: 0,
+      pendingRootRequests: 0,
+      pendingRootDeliveries: 0,
+      quiescenceReasons: [],
+    });
+    registerInteropProvider(SAFE_AGENT_FABRIC_PROVIDER_NAME, { getSnapshot });
+
+    const harness = makeExtensionHarness();
+    const context = contextWithUsage(15_000, 64_000, compactionHistory());
+
+    const sessionStart = harness.handlers.get("session_start")?.[0];
+    await sessionStart?.({}, context);
+
+    // Ordinary settled boundary with no semantic compaction and no checkpoint reset
+    const agentSettled = harness.handlers.get("agent_settled")?.[0];
+    await agentSettled?.({}, context);
+    await flushImmediate();
+
+    // Fabric should NOT be queried
+    expect(getSnapshot).not.toHaveBeenCalled();
+
+    registry.providers.clear();
+  });
+
+  it("does not record evidence reduction when full output copy cannot be saved", async () => {
+    const harness = makeExtensionHarness();
+    const context = contextWithUsage(15_000, 64_000, compactionHistory());
+
+    const sessionStart = harness.handlers.get("session_start")?.[0];
+    await sessionStart?.({}, context);
+
+    const storage = getSessionRecoveryStorage();
+    const originalSave = storage.save.bind(storage);
+    // Simulate save failure
+    storage.save = vi.fn().mockResolvedValue(undefined);
+
+    const toolResult = harness.handlers.get("tool_result")?.[0];
+    const largeOutput = "error TS2322: type mismatch\n" + "build detail\n".repeat(500);
+    const result = await toolResult?.(
+      {
+        toolName: "bash",
+        input: { command: "npm test" },
+        content: [{ type: "text", text: largeOutput }],
+        isError: false,
+      },
+      context,
+    );
+
+    // Because save failed, tool_result preserves original content
+    expect(result).toBeUndefined();
+
+    storage.save = originalSave;
   });
 });

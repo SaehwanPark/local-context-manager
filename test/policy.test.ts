@@ -61,6 +61,30 @@ describe("compaction policy", () => {
     expect(gate.canRequest(3, false)).toBe(true);
   });
 
+  it("does not rearm in a loop when compaction lands above compactThresholdTokens without growth", () => {
+    // Balanced mode: rearmTokens = 24k, threshold = 32k.
+    // Compaction completes at 33k (already above threshold).
+    const gate = new CompactionGate({ rearmTokens: 24_000 });
+    gate.request(1);
+    gate.complete(33_000, 1);
+    expect(gate.isArmed).toBe(false);
+
+    // Context remains at 33k: must remain disarmed (no growth)
+    gate.observe(33_000, 32_000);
+    expect(gate.isArmed).toBe(false);
+    expect(gate.canRequest(3, false)).toBe(false);
+
+    // Minor growth below margin (33_500): must remain disarmed
+    gate.observe(33_500, 32_000);
+    expect(gate.isArmed).toBe(false);
+    expect(gate.canRequest(3, false)).toBe(false);
+
+    // Meaningful growth beyond 33k (>= 33k + margin, e.g. 35_500): rearms
+    gate.observe(35_500, 32_000);
+    expect(gate.isArmed).toBe(true);
+    expect(gate.canRequest(3, false)).toBe(true);
+  });
+
   it("rearms after a failed request with a turn backoff", () => {
     const gate = new CompactionGate({ rearmTokens: 24_000 });
     gate.request(1);
