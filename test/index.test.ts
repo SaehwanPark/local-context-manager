@@ -568,7 +568,7 @@ describe("extension integration", () => {
   it("preserves recovery copies across session_shutdown (resume/fork lifecycle)", async () => {
     const harness = makeExtensionHarness();
     const context = contextWithUsage(10_000, 64_000);
-    const storage = getSessionRecoveryStorage();
+    const storage = getSessionRecoveryStorage("session-test-fork-resume");
 
     const savedPath = await storage.save("essential tool result to survive across fork/resume", "bash");
     expect(savedPath).toBeDefined();
