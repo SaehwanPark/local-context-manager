@@ -655,7 +655,7 @@ describe("tool-output reduction", () => {
       const initialHb = await readFile(join(parentDir, "heartbeat"), "utf8");
 
       // Wait a tiny bit to advance time
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 20));
 
       // Child session is created (e.g. after fork)
       const storageChild = new SessionRecoveryStorage({ sessionId: "session-child", baseDirectory: baseDir });
@@ -664,9 +664,18 @@ describe("tool-output reduction", () => {
       // Child tool input references parent session's file
       storageChild.noteReferences({ command: `cat ${parentFile}` });
 
-      // Parent heartbeat should have been refreshed
-      const afterHb = await readFile(join(parentDir, "heartbeat"), "utf8");
-      expect(Number(afterHb)).toBeGreaterThan(Number(initialHb));
+      // Poll parent heartbeat until updated by background lease touch
+      let afterHb = 0;
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        const raw = await readFile(join(parentDir, "heartbeat"), "utf8").catch(() => "");
+        const val = Number(raw.trim());
+        if (!Number.isNaN(val) && val > Number(initialHb)) {
+          afterHb = val;
+          break;
+        }
+      }
+      expect(afterHb).toBeGreaterThan(Number(initialHb));
     } finally {
       await rm(baseDir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -680,11 +689,20 @@ describe("tool-output reduction", () => {
       const dir = await storage.getDirectory();
       const initialHb = await readFile(join(dir, "heartbeat"), "utf8");
 
-      await new Promise((r) => setTimeout(r, 15));
-      await touchSessionLease(sessionId, baseDir);
+      await new Promise((r) => setTimeout(r, 20));
+      await touchSessionLease(sessionId, baseDir, true);
 
-      const afterHb = await readFile(join(dir, "heartbeat"), "utf8");
-      expect(Number(afterHb)).toBeGreaterThan(Number(initialHb));
+      let afterHb = 0;
+      for (let i = 0; i < 40; i++) {
+        const raw = await readFile(join(dir, "heartbeat"), "utf8").catch(() => "");
+        const val = Number(raw.trim());
+        if (!Number.isNaN(val) && val > Number(initialHb)) {
+          afterHb = val;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(afterHb).toBeGreaterThan(Number(initialHb));
     } finally {
       await rm(baseDir, { recursive: true, force: true }).catch(() => undefined);
     }

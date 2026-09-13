@@ -1432,12 +1432,13 @@ export async function saveRecoveryCopy(
 export async function touchSessionLease(
   sessionId?: string,
   baseDir = DEFAULT_BASE_RECOVERY_DIR,
+  force = false,
 ): Promise<void> {
   const trimmed = sessionId?.trim();
   if (trimmed) {
     const storage = sessionStorages.get(trimmed);
     if (storage) {
-      await storage.touchLease();
+      await storage.touchLease(undefined, force);
       return;
     }
     const sessionHash = createHash("sha256").update(trimmed).digest("hex").slice(0, 16);
@@ -1448,7 +1449,7 @@ export async function touchSessionLease(
       await writeFile(heartbeatPath, String(Date.now()), { encoding: "utf8", mode: 0o600 }).catch(() => undefined);
     }
   } else if (defaultStorage) {
-    await defaultStorage.touchLease();
+    await defaultStorage.touchLease(undefined, force);
   }
 }
 
